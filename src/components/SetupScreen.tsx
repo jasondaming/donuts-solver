@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { BoardConfig, GameMode, QuadrantConfig, Direction } from '../game/types';
 import { TILE_PATTERNS, getTileGrid } from '../game/tiles';
 import { DirectionLine } from './DirectionLine';
+import { ImageSetupModal } from './ImageSetupModal';
 
 interface Props {
   onStart: (config: BoardConfig, mode: GameMode) => void;
@@ -141,9 +142,22 @@ function QuadrantSetup({
   );
 }
 
+const ghostBtn: React.CSSProperties = {
+  background: 'rgba(255,255,255,0.18)',
+  color: '#fff',
+  border: '1px solid rgba(255,255,255,0.35)',
+  borderRadius: 8,
+  padding: '6px 16px',
+  fontSize: 13,
+  fontWeight: 600,
+  cursor: 'pointer',
+  fontFamily: 'inherit',
+};
+
 export function SetupScreen({ onStart }: Props) {
   const [config, setConfig] = useState<BoardConfig>(randomConfig);
   const [mode, setMode] = useState<GameMode>('hvh');
+  const [showImageModal, setShowImageModal] = useState(false);
 
   function updateQuadrant(index: number, incoming: QuadrantConfig) {
     const quadrants = [...config.quadrants] as BoardConfig['quadrants'];
@@ -183,26 +197,31 @@ export function SetupScreen({ onStart }: Props) {
         </p>
       </div>
 
-      {/* Board preview + randomize */}
+      {/* Board preview + actions */}
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
         <BoardPreview config={config} />
-        <button
-          onClick={() => setConfig(randomConfig())}
-          style={{
-            background: 'rgba(255,255,255,0.18)',
-            color: '#fff',
-            border: '1px solid rgba(255,255,255,0.35)',
-            borderRadius: 8,
-            padding: '6px 18px',
-            fontSize: 13,
-            fontWeight: 600,
-            cursor: 'pointer',
-            fontFamily: 'inherit',
-          }}
-        >
-          🎲 Randomize Board
-        </button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button
+            onClick={() => setConfig(randomConfig())}
+            style={ghostBtn}
+          >
+            🎲 Randomize
+          </button>
+          <button
+            onClick={() => setShowImageModal(true)}
+            style={ghostBtn}
+          >
+            📷 From Image
+          </button>
+        </div>
       </div>
+
+      {showImageModal && (
+        <ImageSetupModal
+          onConfirm={cfg => { setConfig(cfg); setShowImageModal(false); }}
+          onCancel={() => setShowImageModal(false)}
+        />
+      )}
 
       {/* Quadrant setup — 2×2 grid matching board layout */}
       <div style={{ width: '100%' }}>

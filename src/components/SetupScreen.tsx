@@ -8,14 +8,13 @@ interface Props {
 }
 
 const QUADRANT_LABELS = ['Top-Left', 'Top-Right', 'Bottom-Left', 'Bottom-Right'];
-const KNOWN_PATTERNS = TILE_PATTERNS.slice(0, 5); // Only show the 5 known patterns
 
 const DEFAULT_CONFIG: BoardConfig = {
   quadrants: [
     { patternId: 0, rotation: 0 },
-    { patternId: 1, rotation: 1 },
-    { patternId: 2, rotation: 2 },
-    { patternId: 3, rotation: 3 },
+    { patternId: 1, rotation: 0 },
+    { patternId: 2, rotation: 0 },
+    { patternId: 3, rotation: 0 },
   ],
 };
 
@@ -71,7 +70,7 @@ function QuadrantSetup({
               onChange={e => onChange({ ...config, patternId: Number(e.target.value) })}
               style={selectStyle}
             >
-              {KNOWN_PATTERNS.map(p => (
+              {TILE_PATTERNS.map(p => (
                 <option key={p.id} value={p.id}>{p.name}</option>
               ))}
             </select>

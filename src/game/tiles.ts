@@ -1,9 +1,13 @@
 import type { Direction, TilePattern } from './types';
 
+// 4 unique tile face patterns. Each physical tile can be placed in any of the
+// 4 board quadrants at any of 4 rotations (0°/90°/180°/270° CW).
+// Note: patterns that look different are just rotations of one of these 4.
+// Verified: the apparent "5th pattern" is Pattern 1 rotated 270° CW.
 export const TILE_PATTERNS: TilePattern[] = [
   {
     id: 0,
-    name: 'Pattern 1',
+    name: 'Tile A',
     grid: [
       ['A', 'H', 'V'],
       ['D', 'H', 'D'],
@@ -12,7 +16,7 @@ export const TILE_PATTERNS: TilePattern[] = [
   },
   {
     id: 1,
-    name: 'Pattern 2',
+    name: 'Tile B',
     grid: [
       ['A', 'D', 'H'],
       ['H', 'V', 'V'],
@@ -21,7 +25,7 @@ export const TILE_PATTERNS: TilePattern[] = [
   },
   {
     id: 2,
-    name: 'Pattern 3',
+    name: 'Tile C',
     grid: [
       ['D', 'V', 'D'],
       ['A', 'V', 'A'],
@@ -30,48 +34,11 @@ export const TILE_PATTERNS: TilePattern[] = [
   },
   {
     id: 3,
-    name: 'Pattern 4',
+    name: 'Tile D',
     grid: [
       ['H', 'D', 'A'],
       ['V', 'A', 'H'],
       ['A', 'D', 'V'],
-    ],
-  },
-  {
-    id: 4,
-    name: 'Pattern 5',
-    grid: [
-      ['H', 'A', 'H'],
-      ['V', 'V', 'H'],
-      ['D', 'A', 'D'],
-    ],
-  },
-  // Patterns 6-8 to be added when discovered
-  {
-    id: 5,
-    name: 'Pattern 6 (TBD)',
-    grid: [
-      ['H', 'H', 'H'],
-      ['H', 'H', 'H'],
-      ['H', 'H', 'H'],
-    ],
-  },
-  {
-    id: 6,
-    name: 'Pattern 7 (TBD)',
-    grid: [
-      ['V', 'V', 'V'],
-      ['V', 'V', 'V'],
-      ['V', 'V', 'V'],
-    ],
-  },
-  {
-    id: 7,
-    name: 'Pattern 8 (TBD)',
-    grid: [
-      ['D', 'D', 'D'],
-      ['D', 'D', 'D'],
-      ['D', 'D', 'D'],
     ],
   },
 ];
@@ -91,7 +58,7 @@ export function rotateTile(grid: Direction[][], times: number): Direction[][] {
     const next: Direction[][] = Array.from({ length: 3 }, () => Array(3).fill('H'));
     for (let r = 0; r < 3; r++) {
       for (let c = 0; c < 3; c++) {
-        // 90° CW: new[c][2-r] = old[r][c]
+        // 90° CW: new[c][2-r] = rotateDir(old[r][c])
         next[c][2 - r] = rotateDir90(g[r][c]);
       }
     }

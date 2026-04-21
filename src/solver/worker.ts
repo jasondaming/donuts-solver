@@ -2,35 +2,24 @@ import type { GameState } from '../game/types';
 import { analyzePosition } from './solver';
 import type { SolverResult } from './solver';
 
-let cancelToken = { cancelled: false };
+// The worker is terminated (not cancelled) when the position changes,
+// so we don't need a cancel mechanism — just run until done or killed.
+const cancelToken = { cancelled: false };
 
 self.onmessage = (e: MessageEvent) => {
-  const { type, state } = e.data as { type: string; state: GameState };
+  const { state } = e.data as { type: string; state: GameState };
+  const movesLeft = state.vanillaLeft + state.chocolateLeft;
 
-  if (type === 'cancel') {
-    cancelToken.cancelled = true;
-    return;
-  }
+  analyzePosition(
+    state,
+    movesLeft,
+    cancelToken,
+    (partial: SolverResult) => {
+      self.postMessage({ ...partial });
+    },
+  );
 
-  if (type === 'analyze') {
-    cancelToken.cancelled = true; // cancel any running analysis
-    cancelToken = { cancelled: false };
-
-    const movesLeft = state.vanillaLeft + state.chocolateLeft;
-
-    const result = analyzePosition(
-      state,
-      movesLeft,
-      cancelToken,
-      (partial: SolverResult) => {
-        if (!cancelToken.cancelled) {
-          self.postMessage({ type: 'partial', ...partial });
-        }
-      },
-    );
-
-    if (!cancelToken.cancelled) {
-      self.postMessage({ type: 'complete', ...result });
-    }
-  }
+  // Final complete message (if we finish all depths without being terminated)
+  const moves = state.vanillaLeft + state.chocolateLeft;
+  self.postMessage({ analyses: [], depth: moves, complete: true });
 };

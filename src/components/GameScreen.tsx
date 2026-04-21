@@ -12,7 +12,6 @@ interface Props {
 }
 
 interface SolverMsg {
-  type: 'partial' | 'complete';
   analyses: MoveAnalysis[];
   depth: number;
   complete: boolean;
@@ -27,29 +26,10 @@ export function GameScreen({ config, mode, onNewGame }: Props) {
   const [solverComplete, setSolverComplete] = useState(false);
   const [editingPosition, setEditingPosition] = useState(false);
 
-  const workerRef = useRef<Worker | null>(null);
   const aiTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(() => {
-    const worker = new Worker(
-      new URL('../solver/worker.ts', import.meta.url),
-      { type: 'module' }
-    );
-    workerRef.current = worker;
-
-    worker.onmessage = (e: MessageEvent<SolverMsg>) => {
-      const { analyses, depth, complete } = e.data;
-      setHints(analyses ?? []);
-      setSolverDepth(depth ?? 0);
-      if (complete) setSolverComplete(true);
-    };
-
-    return () => {
-      worker.terminate();
-      workerRef.current = null;
-    };
-  }, []);
-
+  // Spawn a fresh worker for every state. Cleanup terminates it immediately,
+  // so results from a prior position can never arrive as stale hints.
   useEffect(() => {
     if (state.status.type !== 'playing') return;
 
@@ -57,10 +37,23 @@ export function GameScreen({ config, mode, onNewGame }: Props) {
     setSolverDepth(0);
     setSolverComplete(false);
 
-    workerRef.current?.postMessage({ type: 'cancel' });
-    workerRef.current?.postMessage({ type: 'analyze', state });
+    const worker = new Worker(
+      new URL('../solver/worker.ts', import.meta.url),
+      { type: 'module' },
+    );
+
+    worker.onmessage = (e: MessageEvent<SolverMsg>) => {
+      setHints(e.data.analyses ?? []);
+      setSolverDepth(e.data.depth ?? 0);
+      if (e.data.complete) setSolverComplete(true);
+    };
+
+    worker.postMessage({ type: 'analyze', state });
+
+    return () => worker.terminate();
   }, [state]);
 
+  // AI move: fires whenever fresh hints arrive for the AI's turn
   useEffect(() => {
     const isAITurn =
       (mode === 'hva' && state.currentPlayer === 'chocolate') ||

@@ -6,13 +6,14 @@ interface Props {
   hintsEnabled: boolean;
   onToggleHints: () => void;
   onNewGame: () => void;
+  onEditPosition: () => void;
   solverDepth: number;
   solverComplete: boolean;
   hints: MoveAnalysis[];
 }
 
 export function GameInfo({
-  state, mode, hintsEnabled, onToggleHints, onNewGame,
+  state, mode, hintsEnabled, onToggleHints, onNewGame, onEditPosition,
   solverDepth, solverComplete, hints,
 }: Props) {
   const { currentPlayer, status, vanillaLeft, chocolateLeft, constrainedLine } = state;
@@ -128,6 +129,11 @@ export function GameInfo({
           {hintsEnabled ? '🟢 Hints On' : '⚫ Hints Off'}
         </button>
       )}
+
+      {/* Edit position */}
+      <button onClick={onEditPosition} style={btnStyle('#7b5ea7')}>
+        ✏️ Edit Position
+      </button>
 
       {/* New game */}
       <button onClick={onNewGame} style={btnStyle('#e85d9a')}>

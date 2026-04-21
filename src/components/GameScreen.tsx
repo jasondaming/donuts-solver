@@ -3,6 +3,7 @@ import type { BoardConfig, GameMode, GameState, MoveAnalysis } from '../game/typ
 import { createInitialState, getValidMoves, applyMove } from '../game/engine';
 import { BoardView } from './BoardView';
 import { GameInfo } from './GameInfo';
+import { PositionEditor } from './PositionEditor';
 
 interface Props {
   config: BoardConfig;
@@ -24,11 +25,11 @@ export function GameScreen({ config, mode, onNewGame }: Props) {
   const [lastPlaced, setLastPlaced] = useState<[number, number] | null>(null);
   const [solverDepth, setSolverDepth] = useState(0);
   const [solverComplete, setSolverComplete] = useState(false);
+  const [editingPosition, setEditingPosition] = useState(false);
 
   const workerRef = useRef<Worker | null>(null);
   const aiTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Initialize worker
   useEffect(() => {
     const worker = new Worker(
       new URL('../solver/worker.ts', import.meta.url),
@@ -49,7 +50,6 @@ export function GameScreen({ config, mode, onNewGame }: Props) {
     };
   }, []);
 
-  // Run solver whenever state changes (if playing)
   useEffect(() => {
     if (state.status.type !== 'playing') return;
 
@@ -61,7 +61,6 @@ export function GameScreen({ config, mode, onNewGame }: Props) {
     workerRef.current?.postMessage({ type: 'analyze', state });
   }, [state]);
 
-  // AI move: trigger after hints come in (first result available)
   useEffect(() => {
     const isAITurn =
       (mode === 'hva' && state.currentPlayer === 'chocolate') ||
@@ -69,7 +68,6 @@ export function GameScreen({ config, mode, onNewGame }: Props) {
 
     if (!isAITurn || state.status.type !== 'playing' || hints.length === 0) return;
 
-    // Wait a moment so the user can see the analysis before the AI moves
     if (aiTimerRef.current) clearTimeout(aiTimerRef.current);
     aiTimerRef.current = setTimeout(() => {
       const best = pickBestMove(hints);
@@ -90,41 +88,57 @@ export function GameScreen({ config, mode, onNewGame }: Props) {
     setLastPlaced([row, col]);
   }, []);
 
+  function handlePositionConfirm(newState: GameState) {
+    setEditingPosition(false);
+    setState(newState);
+    setLastPlaced(null);
+  }
+
   const isAITurn =
     (mode === 'hva' && state.currentPlayer === 'chocolate') ||
     (mode === 'avh' && state.currentPlayer === 'vanilla');
 
-  // Determine cell size based on viewport (simple responsive sizing)
   const cellSize = Math.min(80, Math.floor((window.innerWidth - 320) / 6));
 
   return (
-    <div style={{
-      display: 'flex',
-      gap: 24,
-      alignItems: 'flex-start',
-      justifyContent: 'center',
-      padding: '24px 16px',
-      flexWrap: 'wrap',
-    }}>
-      <BoardView
-        state={state}
-        onMove={isAITurn ? () => {} : handleMove}
-        hints={hints}
-        hintsEnabled={hintsEnabled}
-        lastPlaced={lastPlaced}
-        cellSize={cellSize}
-      />
-      <GameInfo
-        state={state}
-        mode={mode}
-        hintsEnabled={hintsEnabled}
-        onToggleHints={() => setHintsEnabled(h => !h)}
-        onNewGame={onNewGame}
-        solverDepth={solverDepth}
-        solverComplete={solverComplete}
-        hints={hints}
-      />
-    </div>
+    <>
+      <div style={{
+        display: 'flex',
+        gap: 24,
+        alignItems: 'flex-start',
+        justifyContent: 'center',
+        padding: '24px 16px',
+        flexWrap: 'wrap',
+      }}>
+        <BoardView
+          state={state}
+          onMove={isAITurn ? () => {} : handleMove}
+          hints={hints}
+          hintsEnabled={hintsEnabled}
+          lastPlaced={lastPlaced}
+          cellSize={cellSize}
+        />
+        <GameInfo
+          state={state}
+          mode={mode}
+          hintsEnabled={hintsEnabled}
+          onToggleHints={() => setHintsEnabled(h => !h)}
+          onNewGame={onNewGame}
+          onEditPosition={() => setEditingPosition(true)}
+          solverDepth={solverDepth}
+          solverComplete={solverComplete}
+          hints={hints}
+        />
+      </div>
+
+      {editingPosition && (
+        <PositionEditor
+          baseState={state}
+          onConfirm={handlePositionConfirm}
+          onCancel={() => setEditingPosition(false)}
+        />
+      )}
+    </>
   );
 }
 

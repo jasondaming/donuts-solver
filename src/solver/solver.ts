@@ -1,5 +1,7 @@
-import type { GameState, MoveAnalysis } from '../game/types';
-import { getValidMoves, applyMove } from '../game/engine';
+import type { GameState, MoveAnalysis, SolverProgress } from '../game/types';
+import { getValidMoves, applyMove } from '../game/engine.ts';
+import { encodeStateKey, invertMove, transformMove } from './stateKey.ts';
+import type { ExactCacheLike } from './exactCacheTypes.ts';
 
 const WIN = 10000;
 const INF = 999999;
@@ -9,113 +11,230 @@ interface TEntry {
   score: number;
   depth: number;
   type: 'exact' | 'lower' | 'upper';
+  bestMove: [number, number] | null;
 }
 
 const transTable = new Map<string, TEntry>();
 
-function encodeState(state: GameState): string {
-  let s = '';
-  for (const row of state.board) {
-    for (const cell of row) {
-      s += cell.piece === null ? '0' : cell.piece === 'vanilla' ? '1' : '2';
-    }
-  }
-  s += state.currentPlayer[0]; // 'v' or 'c'
-  if (state.constrainedLine) {
-    s += state.constrainedLine.dir + state.constrainedLine.index;
-  } else {
-    s += 'N';
-  }
-  return s;
+interface SearchValue {
+  score: number;
+  exact: boolean;
+  bestMove: [number, number] | null;
+}
+
+interface SearchContext {
+  cache?: ExactCacheLike;
+  stats?: SolverProgress;
 }
 
 // Returns score from vanilla's perspective.
-// +WIN - movesPlayed = vanilla wins sooner = better
-// -(WIN - movesPlayed) = chocolate wins sooner = worse for vanilla
+// +WIN - pliesFromRoot = vanilla wins sooner = better.
+// -(WIN - pliesFromRoot) = chocolate wins sooner = worse for vanilla.
 function minimax(
   state: GameState,
   depth: number,
   alpha: number,
   beta: number,
-  movesPlayed: number,
+  pliesFromRoot: number,
   cancelToken: { cancelled: boolean },
-): number {
-  if (cancelToken.cancelled) return 0;
+  context: SearchContext,
+): SearchValue {
+  if (cancelToken.cancelled) return { score: 0, exact: false, bestMove: null };
+  if (context.stats) context.stats.nodesVisited += 1;
 
   if (state.status.type !== 'playing') {
-    if (state.status.type === 'draw') return 0;
-    const score = WIN - movesPlayed;
-    return state.status.winner === 'vanilla' ? score : -score;
+    if (state.status.type === 'draw') return { score: 0, exact: true, bestMove: null };
+    const score = WIN - pliesFromRoot;
+    return { score: state.status.winner === 'vanilla' ? score : -score, exact: true, bestMove: null };
   }
 
-  if (depth === 0) return 0;
+  if (depth === 0) return { score: 0, exact: false, bestMove: null };
 
-  const key = encodeState(state);
+  const encoded = encodeStateKey(state);
+  const key = encoded.key;
+  const symmetry = encoded.symmetry;
+  const cachedExact = context.cache?.get(key);
+  if (cachedExact && cachedExact.depth >= depth) {
+    if (context.stats) context.stats.cacheHits += 1;
+    if (cachedExact.type === 'exact') {
+      return {
+        score: cachedExact.score,
+        exact: true,
+        bestMove: cachedExact.bestMove ? invertMove(cachedExact.bestMove, symmetry) : null,
+      };
+    }
+    if (cachedExact.type === 'lower') alpha = Math.max(alpha, cachedExact.score);
+    if (cachedExact.type === 'upper') beta = Math.min(beta, cachedExact.score);
+    if (alpha >= beta) {
+      return {
+        score: cachedExact.score,
+        exact: false,
+        bestMove: cachedExact.bestMove ? invertMove(cachedExact.bestMove, symmetry) : null,
+      };
+    }
+  }
+
   const cached = transTable.get(key);
   if (cached && cached.depth >= depth) {
-    if (cached.type === 'exact') return cached.score;
+    if (cached.type === 'exact') {
+      return {
+        score: cached.score,
+        exact: true,
+        bestMove: cached.bestMove ? invertMove(cached.bestMove, symmetry) : null,
+      };
+    }
     if (cached.type === 'lower') alpha = Math.max(alpha, cached.score);
     if (cached.type === 'upper') beta = Math.min(beta, cached.score);
-    if (alpha >= beta) return cached.score;
+    if (alpha >= beta) {
+      return {
+        score: cached.score,
+        exact: false,
+        bestMove: cached.bestMove ? invertMove(cached.bestMove, symmetry) : null,
+      };
+    }
   }
 
   const moves = getValidMoves(state);
   const isMaximizing = state.currentPlayer === 'vanilla';
 
   // Move ordering: check for immediate wins first
-  const orderedMoves = orderMoves(state, moves);
+  const orderedMoves = orderMoves(
+    state,
+    moves,
+    cached?.bestMove ? invertMove(cached.bestMove, symmetry) : null,
+  );
 
   let bestScore = isMaximizing ? -INF : INF;
-  let entryType: TEntry['type'] = 'upper';
+  let bestMove: [number, number] | null = null;
+  const originalAlpha = alpha;
+  const originalBeta = beta;
+  let allChildrenExact = true;
 
   for (const [row, col] of orderedMoves) {
-    if (cancelToken.cancelled) return 0;
+    if (cancelToken.cancelled) return { score: 0, exact: false, bestMove: null };
 
     const next = applyMove(state, row, col);
-    const score = minimax(next, depth - 1, alpha, beta, movesPlayed + 1, cancelToken);
+    const child = minimax(next, depth - 1, alpha, beta, pliesFromRoot + 1, cancelToken, context);
+    const score = child.score;
+    if (!child.exact) allChildrenExact = false;
 
     if (isMaximizing) {
       if (score > bestScore) {
         bestScore = score;
-        entryType = 'exact';
+        bestMove = [row, col];
       }
-      if (score > alpha) { alpha = score; entryType = 'exact'; }
+      if (score > alpha) alpha = score;
     } else {
       if (score < bestScore) {
         bestScore = score;
-        entryType = 'exact';
+        bestMove = [row, col];
       }
-      if (score < beta) { beta = score; entryType = 'exact'; }
+      if (score < beta) beta = score;
     }
 
-    if (alpha >= beta) {
-      entryType = isMaximizing ? 'lower' : 'upper';
-      break;
-    }
+    if (alpha >= beta) break;
   }
 
-  transTable.set(key, { score: bestScore, depth, type: entryType });
-  return bestScore;
+  const entryType: TEntry['type'] = allChildrenExact
+    ? 'exact'
+    : bestScore <= originalAlpha
+    ? 'upper'
+    : bestScore >= originalBeta
+    ? 'lower'
+    : 'exact';
+  transTable.set(key, {
+    score: bestScore,
+    depth,
+    type: entryType,
+    bestMove: bestMove ? transformMove(bestMove, symmetry) : null,
+  });
+  const exact = allChildrenExact;
+  if (context.cache) {
+    context.cache.set(key, {
+      score: bestScore,
+      depth,
+      bestMove: bestMove ? transformMove(bestMove, symmetry) : null,
+      type: entryType,
+      updatedAt: Date.now(),
+    });
+    if (context.stats) context.stats.cacheStores += 1;
+  }
+  return { score: bestScore, exact, bestMove };
 }
 
-function orderMoves(state: GameState, moves: [number, number][]): [number, number][] {
-  // Score each move heuristically for ordering (higher = try first)
+function orderMoves(
+  state: GameState,
+  moves: [number, number][],
+  preferredMove: [number, number] | null,
+): [number, number][] {
+  // Score each move heuristically from vanilla's perspective.
   const scored = moves.map(([r, c]) => {
     const next = applyMove(state, r, c);
     let score = 0;
-    // Immediate win
-    if (next.status.type === 'won') score += 10000;
-    // Insertion happened (flipped opponent pieces)
+    if (next.status.type === 'won') {
+      score += next.status.winner === 'vanilla' ? 10000 : -10000;
+    }
     const flipped = countFlipped(state, next);
-    score += flipped * 100;
-    // Center preference
+    score += (state.currentPlayer === 'vanilla' ? 1 : -1) * flipped * 100;
     const dr = r - 2.5, dc = c - 2.5;
-    score += Math.max(0, 4 - Math.sqrt(dr*dr + dc*dc)) * 10;
+    score += (state.currentPlayer === 'vanilla' ? 1 : -1)
+      * Math.max(0, 4 - Math.sqrt(dr*dr + dc*dc)) * 10;
+    if (preferredMove && preferredMove[0] === r && preferredMove[1] === c) {
+      score += 5000;
+    }
     return { r, c, score };
   });
 
-  scored.sort((a, b) => b.score - a.score);
+  scored.sort((a, b) =>
+    state.currentPlayer === 'vanilla' ? b.score - a.score : a.score - b.score
+  );
   return scored.map(s => [s.r, s.c] as [number, number]);
+}
+
+function orderRootMoves(
+  state: GameState,
+  moves: [number, number][],
+  analyses: MoveAnalysis[] | null,
+): [number, number][] {
+  if (!analyses || analyses.length === 0) {
+    return orderMoves(state, moves, null);
+  }
+
+  const prior = new Map(analyses.map(a => [`${a.row},${a.col}`, a]));
+  return [...moves].sort((a, b) => compareRootAnalyses(prior.get(`${a[0]},${a[1]}`), prior.get(`${b[0]},${b[1]}`), state.currentPlayer));
+}
+
+function compareRootAnalyses(
+  a: MoveAnalysis | undefined,
+  b: MoveAnalysis | undefined,
+  currentPlayer: 'vanilla' | 'chocolate',
+): number {
+  if (!a && !b) return 0;
+  if (!a) return 1;
+  if (!b) return -1;
+
+  const rank = (h: MoveAnalysis) =>
+    h.outcome === 'win' ? 0 :
+    h.outcome === 'draw' ? 1 :
+    h.outcome === 'unknown' ? 2 :
+    3;
+
+  const ar = rank(a), br = rank(b);
+  if (ar !== br) return ar - br;
+  if (a.outcome === 'win' && b.outcome === 'win') {
+    return currentPlayer === 'vanilla'
+      ? (a.movesToEnd ?? Number.MAX_SAFE_INTEGER) - (b.movesToEnd ?? Number.MAX_SAFE_INTEGER)
+      : (a.movesToEnd ?? Number.MAX_SAFE_INTEGER) - (b.movesToEnd ?? Number.MAX_SAFE_INTEGER);
+  }
+  if (a.outcome === 'loss' && b.outcome === 'loss') {
+    return currentPlayer === 'vanilla'
+      ? (b.movesToEnd ?? 0) - (a.movesToEnd ?? 0)
+      : (b.movesToEnd ?? 0) - (a.movesToEnd ?? 0);
+  }
+  if (a.outcome === 'unknown' && b.outcome === 'unknown') {
+    return b.score - a.score;
+  }
+  return a.row - b.row || a.col - b.col;
 }
 
 function countFlipped(before: GameState, after: GameState): number {
@@ -134,6 +253,14 @@ export interface SolverResult {
   analyses: MoveAnalysis[];
   depth: number;
   complete: boolean;
+  stats?: SolverProgress;
+}
+
+export interface AnalyzeOptions {
+  startDepth?: number;
+  initialResult?: SolverResult | null;
+  cache?: ExactCacheLike;
+  stats?: SolverProgress;
 }
 
 export function analyzePosition(
@@ -141,66 +268,127 @@ export function analyzePosition(
   maxDepth: number,
   cancelToken: { cancelled: boolean },
   onPartial?: (result: SolverResult) => void,
+  options: AnalyzeOptions = {},
 ): SolverResult {
   transTable.clear();
+  const startedAt = Date.now();
+  const stats = options.stats ?? {
+    nodesVisited: 0,
+    cacheHits: 0,
+    cacheStores: 0,
+    elapsedMs: 0,
+  };
 
   const moves = getValidMoves(state);
-  if (moves.length === 0) return { analyses: [], depth: 0, complete: true };
+  if (moves.length === 0) {
+    stats.elapsedMs = Date.now() - startedAt;
+    return { analyses: [], depth: 0, complete: true, stats: { ...stats } };
+  }
 
-  const totalMovesPlayed = 30 - state.vanillaLeft - state.chocolateLeft;
   const movesLeft = state.vanillaLeft + state.chocolateLeft;
   const isVanilla = state.currentPlayer === 'vanilla';
+  let rootOrder = orderRootMoves(state, moves, null);
 
-  let currentAnalyses: MoveAnalysis[] = moves.map(([r, c]) => ({
-    row: r, col: c, outcome: 'draw', movesToEnd: movesLeft, depth: 0,
+  const initialResult = options.initialResult ?? null;
+  let currentAnalyses: MoveAnalysis[] = initialResult?.analyses ?? moves.map(([r, c]) => ({
+    row: r,
+    col: c,
+    outcome: 'unknown',
+    movesToEnd: null,
+    depth: 0,
+    proven: false,
+    score: 0,
   }));
 
-  for (let depth = 1; depth <= maxDepth; depth++) {
+  if (initialResult && (initialResult.complete || initialResult.depth >= maxDepth)) {
+    stats.elapsedMs = Date.now() - startedAt;
+    return { ...initialResult, stats: { ...stats } };
+  }
+
+  const startDepth = Math.max(1, options.startDepth ?? 1);
+  for (let depth = startDepth; depth <= maxDepth; depth++) {
     if (cancelToken.cancelled) break;
 
+    const depthStartedAt = Date.now();
+    const depthStartNodes = stats.nodesVisited;
+    const depthStartCacheHits = stats.cacheHits;
+    const depthStartCacheStores = stats.cacheStores;
     const analyses: MoveAnalysis[] = [];
 
-    for (const [row, col] of moves) {
+    for (const [row, col] of rootOrder) {
       if (cancelToken.cancelled) break;
 
       const next = applyMove(state, row, col);
 
-      let outcome: 'win' | 'loss' | 'draw';
-      let movesToEnd: number;
+      let outcome: MoveAnalysis['outcome'];
+      let movesToEnd: number | null;
+      let proven = false;
+      let score = 0;
 
       if (next.status.type !== 'playing') {
+        proven = true;
+        movesToEnd = 1;
         if (next.status.type === 'draw') {
           outcome = 'draw';
-          movesToEnd = 1;
         } else {
           outcome = next.status.winner === state.currentPlayer ? 'win' : 'loss';
-          movesToEnd = 1;
+          score = outcome === 'win' ? WIN - 1 : -(WIN - 1);
         }
       } else {
-        const score = minimax(next, depth - 1, -INF, INF, totalMovesPlayed + 1, cancelToken);
+        const vanillaEval = minimax(next, depth - 1, -INF, INF, 1, cancelToken, {
+          cache: options.cache,
+          stats,
+        });
+        score = isVanilla ? vanillaEval.score : -vanillaEval.score;
 
         if (score === 0) {
-          outcome = 'draw';
-          movesToEnd = movesLeft;
+          if (vanillaEval.exact) {
+            proven = true;
+            outcome = 'draw';
+          } else {
+            proven = false;
+            outcome = 'unknown';
+          }
+          movesToEnd = null;
         } else if (score > 0) {
-          outcome = isVanilla ? 'win' : 'loss';
+          proven = true;
+          outcome = 'win';
           movesToEnd = WIN - score;
         } else {
-          outcome = isVanilla ? 'loss' : 'win';
+          proven = true;
+          outcome = 'loss';
           movesToEnd = WIN + score;
         }
       }
 
-      analyses.push({ row, col, outcome, movesToEnd, depth });
+      analyses.push({ row, col, outcome, movesToEnd, depth, proven, score });
     }
 
     if (!cancelToken.cancelled) {
       currentAnalyses = analyses;
-      const result: SolverResult = { analyses, depth, complete: depth === maxDepth || depth >= movesLeft };
+      rootOrder = orderRootMoves(state, moves, analyses);
+      stats.elapsedMs = Date.now() - startedAt;
+      stats.depthTimings = [
+        ...(stats.depthTimings ?? []).filter(timing => timing.depth !== depth),
+        {
+          depth,
+          depthNodes: stats.nodesVisited - depthStartNodes,
+          depthCacheHits: stats.cacheHits - depthStartCacheHits,
+          depthCacheStores: stats.cacheStores - depthStartCacheStores,
+          depthElapsedMs: Date.now() - depthStartedAt,
+          nodesVisited: stats.nodesVisited,
+          elapsedMs: stats.elapsedMs,
+        },
+      ].slice(-12);
+      const result: SolverResult = {
+        analyses,
+        depth,
+        complete: depth >= movesLeft || analyses.every(a => a.proven),
+        stats: { ...stats },
+      };
       if (onPartial) onPartial(result);
 
-      // If we found a forced win/loss for all moves, no need to go deeper
-      if (analyses.every(a => a.outcome !== 'draw')) {
+      if (analyses.every(a => a.proven)) {
         return { ...result, complete: true };
       }
 
@@ -211,7 +399,10 @@ export function analyzePosition(
   return {
     analyses: currentAnalyses,
     depth: currentAnalyses[0]?.depth ?? 0,
-    complete: !cancelToken.cancelled && currentAnalyses[0]?.depth >= movesLeft,
+    complete: !cancelToken.cancelled && (
+      currentAnalyses[0]?.depth >= movesLeft || currentAnalyses.every(a => a.proven)
+    ),
+    stats: { ...stats, elapsedMs: Date.now() - startedAt },
   };
 }
 
@@ -225,12 +416,19 @@ export function getBestMove(state: GameState): [number, number] | null {
   const result = analyzePosition(state, movesLeft, cancel);
 
   const analyses = result.analyses;
-  const wins = analyses.filter(a => a.outcome === 'win').sort((a, b) => a.movesToEnd - b.movesToEnd);
+  const wins = analyses
+    .filter(a => a.outcome === 'win' && a.movesToEnd !== null)
+    .sort((a, b) => a.movesToEnd! - b.movesToEnd!);
   if (wins.length > 0) return [wins[0].row, wins[0].col];
 
   const draws = analyses.filter(a => a.outcome === 'draw');
   if (draws.length > 0) return [draws[0].row, draws[0].col];
 
-  const losses = analyses.filter(a => a.outcome === 'loss').sort((a, b) => b.movesToEnd - a.movesToEnd);
+  const unknowns = analyses.filter(a => a.outcome === 'unknown');
+  if (unknowns.length > 0) return [unknowns[0].row, unknowns[0].col];
+
+  const losses = analyses
+    .filter(a => a.outcome === 'loss' && a.movesToEnd !== null)
+    .sort((a, b) => b.movesToEnd! - a.movesToEnd!);
   return [losses[0].row, losses[0].col];
 }

@@ -1,7 +1,7 @@
 import type { BoardConfig, GameState, GameStatus, Player } from './types';
-import { createBoard, deepCloneBoard, getConstrainedLine, getCellsOnLine } from './board';
-import { applyInsertions } from './insertion';
-import { checkWin, largestGroup } from './winCheck';
+import { createBoard, deepCloneBoard, getConstrainedLine, getCellsOnLine } from './board.ts';
+import { applyInsertions } from './insertion.ts';
+import { checkWin, largestGroup } from './winCheck.ts';
 
 export function createInitialState(config: BoardConfig): GameState {
   return {

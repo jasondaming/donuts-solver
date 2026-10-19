@@ -20,7 +20,9 @@ First move for vanilla (W = forced win, . = forced loss)
  . W . . . .
 ```
 
-All 23 boards found in the May solver cache: see [results.md](results.md).
+All 23 boards found in the May solver cache (the board above is board 17): see [results.md](results.md). The first player wins on all 23, every result certified. 215 of 828 first moves win (26%), and only 29 of 92 center-square openings do (32%).
+
+20 more random layouts (seed 99, root value only, not certified) were also first-player wins. Root solves took 0.2 to 8.3 s, with a mean of 2.0 s. At that rate the root values of all 1,536 distinct layouts take about 50 core-minutes. A full first-move map took about 6 times as long as the root solve on the May board (16 s vs. 2.5 s), so maps for every layout come to roughly 5 core-hours, or under an hour on 7 cores.
 
 Every result above was certified. `wdl proof` writes the winner's complete strategy: one move for every position where the winner is to play. `verify-proof.ts` then replays it with the app's own `src/game/engine.ts`, tries every reply of the loser, and checks that every line ends in a win for the winner. The certificate does not depend on the C search being correct, only on the app's rules.
 

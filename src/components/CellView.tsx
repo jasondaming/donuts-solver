@@ -23,6 +23,7 @@ const OUTCOME_COLORS: Record<string, string> = {
   win: 'rgba(0, 200, 80, 0.55)',
   loss: 'rgba(220, 40, 40, 0.55)',
   draw: 'rgba(255, 200, 0, 0.55)',
+  unknown: 'rgba(70, 120, 180, 0.50)',
 };
 
 // Alternating cell background: pink / blue like the physical game
@@ -102,7 +103,7 @@ export function CellView({
             lineHeight: 1.1,
             textAlign: 'center',
           }}>
-            {hint.outcome === 'win' ? '✓' : hint.outcome === 'loss' ? '✗' : '='}
+            {hint.outcome === 'win' ? 'W' : hint.outcome === 'loss' ? 'L' : hint.outcome === 'draw' ? '=' : '?'}
           </span>
           <span style={{
             fontSize: size * 0.17,
@@ -111,14 +112,14 @@ export function CellView({
             textShadow: '0 1px 3px rgba(0,0,0,0.6)',
             lineHeight: 1.1,
           }}>
-            {hint.movesToEnd <= 1 ? 'now' : `in ${hint.movesToEnd}`}
+            {hint.movesToEnd === null ? 'search' : hint.movesToEnd <= 1 ? 'now' : `in ${hint.movesToEnd}`}
           </span>
           <span style={{
             fontSize: size * 0.13,
             color: 'rgba(255,255,255,0.85)',
             textShadow: '0 1px 2px rgba(0,0,0,0.5)',
           }}>
-            {hint.depth < (hint.movesToEnd > 0 ? 30 : 1) ? '~' : ''}
+            {hint.proven ? 'best' : `d${hint.depth}`}
           </span>
         </div>
       )}

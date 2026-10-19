@@ -1,5 +1,5 @@
 import type { GameState } from '../game/types';
-import { analyzePosition } from './solver';
+import { analyzePosition } from './solver.ts';
 import type { SolverResult } from './solver';
 
 // The worker is terminated (not cancelled) when the position changes,
@@ -10,7 +10,7 @@ self.onmessage = (e: MessageEvent) => {
   const { state } = e.data as { type: string; state: GameState };
   const movesLeft = state.vanillaLeft + state.chocolateLeft;
 
-  analyzePosition(
+  const result = analyzePosition(
     state,
     movesLeft,
     cancelToken,
@@ -19,7 +19,6 @@ self.onmessage = (e: MessageEvent) => {
     },
   );
 
-  // Final complete message (if we finish all depths without being terminated)
-  const moves = state.vanillaLeft + state.chocolateLeft;
-  self.postMessage({ analyses: [], depth: moves, complete: true });
+  // Final exact message, preserving the last analyses instead of clearing the UI.
+  self.postMessage({ ...result });
 };

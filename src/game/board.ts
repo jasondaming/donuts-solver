@@ -1,5 +1,5 @@
 import type { Board, BoardConfig, Cell, ConstrainedLine, Direction } from './types';
-import { getTileGrid } from './tiles';
+import { getTileGrid } from './tiles.ts';
 
 const QUADRANT_OFFSETS: [number, number][] = [
   [0, 0], // TL

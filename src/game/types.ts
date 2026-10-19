@@ -40,6 +40,24 @@ export interface GameState {
   status: GameStatus;
 }
 
+export interface SolverDepthTiming {
+  depth: number;
+  depthNodes: number;
+  depthCacheHits: number;
+  depthCacheStores: number;
+  depthElapsedMs: number;
+  nodesVisited: number;
+  elapsedMs: number;
+}
+
+export interface SolverProgress {
+  nodesVisited: number;
+  cacheHits: number;
+  cacheStores: number;
+  elapsedMs: number;
+  depthTimings?: SolverDepthTiming[];
+}
+
 export interface MoveRecord {
   row: number;
   col: number;
@@ -52,9 +70,12 @@ export interface MoveRecord {
 export interface MoveAnalysis {
   row: number;
   col: number;
-  outcome: 'win' | 'loss' | 'draw';
-  movesToEnd: number;
-  depth: number;  // search depth this result came from
+  outcome: 'win' | 'loss' | 'draw' | 'unknown';
+  // Plies from the current position, including this candidate move.
+  movesToEnd: number | null;
+  depth: number;  // plies searched from the current position
+  proven: boolean;
+  score: number;  // positive is good for the side to move
 }
 
 export interface TilePattern {

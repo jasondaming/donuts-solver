@@ -1,4 +1,6 @@
-import type { GameState, MoveAnalysis, GameMode } from '../game/types';
+import type { GameState, MoveAnalysis, GameMode, SolverProgress } from '../game/types';
+import type { TimelineEntry } from '../game/session';
+import type { OpeningGuide, OpeningMoveInsight } from '../game/openingGuide';
 
 interface Props {
   state: GameState;
@@ -7,19 +9,35 @@ interface Props {
   onToggleHints: () => void;
   onNewGame: () => void;
   onEditPosition: () => void;
+  onUndo: () => void;
+  onRedo: () => void;
+  onSwapColors: () => void;
+  onShare: () => void;
+  onLoad: () => void;
+  onNavigateHistory: (index: number) => void;
+  canUndo: boolean;
+  canRedo: boolean;
+  history: TimelineEntry[];
+  historyIndex: number;
+  shareStatus: string | null;
   solverDepth: number;
   solverComplete: boolean;
+  solverSource: 'server' | 'browser' | null;
+  solverStats: SolverProgress | null;
+  openingGuide: OpeningGuide | null;
   hints: MoveAnalysis[];
 }
 
 export function GameInfo({
   state, mode, hintsEnabled, onToggleHints, onNewGame, onEditPosition,
-  solverDepth, solverComplete, hints,
+  onUndo, onRedo, onSwapColors, onShare, onLoad, onNavigateHistory,
+  canUndo, canRedo, history, historyIndex, shareStatus,
+  solverDepth, solverComplete, solverSource, solverStats, openingGuide, hints,
 }: Props) {
   const { currentPlayer, status, vanillaLeft, chocolateLeft, constrainedLine } = state;
 
   const playerLabel = (p: 'vanilla' | 'chocolate') =>
-    p === 'vanilla' ? '🍩 Vanilla' : '🍫 Chocolate';
+    p === 'vanilla' ? 'Vanilla' : 'Chocolate';
 
   const isAITurn =
     (mode === 'hva' && currentPlayer === 'chocolate') ||
@@ -27,11 +45,7 @@ export function GameInfo({
 
   let statusLine = '';
   if (status.type === 'playing') {
-    if (isAITurn) {
-      statusLine = 'AI is thinking…';
-    } else {
-      statusLine = `${playerLabel(currentPlayer)}'s turn`;
-    }
+    statusLine = isAITurn ? 'AI is thinking...' : `${playerLabel(currentPlayer)}'s turn`;
   } else if (status.type === 'won') {
     statusLine = `${playerLabel(status.winner)} wins!`;
   } else {
@@ -46,19 +60,14 @@ export function GameInfo({
     constraintLine = 'Free choice (first move)';
   }
 
-  const bestHint = hints.length > 0
-    ? hints.reduce((best, h) => {
-        if (!best) return h;
-        if (h.outcome === 'win' && best.outcome !== 'win') return h;
-        if (h.outcome === 'win' && best.outcome === 'win' && h.movesToEnd < best.movesToEnd) return h;
-        if (h.outcome === 'draw' && best.outcome === 'loss') return h;
-        return best;
-      }, null as MoveAnalysis | null)
-    : null;
+  const sortedHints = [...hints].sort(compareAnalyses);
+  const bestHint = sortedHints[0] ?? null;
+  const movesLeft = vanillaLeft + chocolateLeft;
+  const openingHints = movesLeft >= 24 ? sortedHints.slice(0, 6) : [];
+  const searchEstimate = estimateSearch(solverStats, solverDepth, movesLeft);
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minWidth: 220 }}>
-      {/* Player status */}
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minWidth: 240, maxWidth: 320 }}>
       <div style={{
         background: 'rgba(255,255,255,0.15)',
         borderRadius: 12,
@@ -74,7 +83,6 @@ export function GameInfo({
         )}
       </div>
 
-      {/* Piece counts */}
       <div style={{
         background: 'rgba(255,255,255,0.15)',
         borderRadius: 12,
@@ -88,7 +96,86 @@ export function GameInfo({
         <PieceCount player="chocolate" left={chocolateLeft} current={currentPlayer} />
       </div>
 
-      {/* Solver status */}
+      <div style={{
+        background: 'rgba(255,255,255,0.12)',
+        borderRadius: 12,
+        padding: '10px 12px',
+        backdropFilter: 'blur(8px)',
+        border: '1px solid rgba(255,255,255,0.25)',
+      }}>
+        <div style={{ fontWeight: 700, marginBottom: 8, color: '#fff', fontSize: 13 }}>Game Controls</div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 6 }}>
+          <button onClick={onUndo} disabled={!canUndo} style={smallBtnStyle('#386e9f', !canUndo)}>
+            Undo
+          </button>
+          <button onClick={onRedo} disabled={!canRedo} style={smallBtnStyle('#386e9f', !canRedo)}>
+            Forward
+          </button>
+          <button onClick={onSwapColors} style={smallBtnStyle('#8b6f2f')}>
+            Swap Colors
+          </button>
+          <button onClick={onShare} style={smallBtnStyle('#2f8b64')}>
+            Share
+          </button>
+          <button onClick={onLoad} style={smallBtnStyle('#655d96')}>
+            Load
+          </button>
+          <button onClick={onEditPosition} style={smallBtnStyle('#7b5ea7')}>
+            Edit
+          </button>
+        </div>
+        {shareStatus && (
+          <div style={{ color: 'rgba(255,255,255,0.75)', fontSize: 12, marginTop: 7 }}>
+            {shareStatus}
+          </div>
+        )}
+      </div>
+
+      <div style={{
+        background: 'rgba(255,255,255,0.12)',
+        borderRadius: 12,
+        padding: '10px 12px',
+        backdropFilter: 'blur(8px)',
+        border: '1px solid rgba(255,255,255,0.25)',
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+          <div style={{ fontWeight: 700, color: '#fff', fontSize: 13 }}>Move History</div>
+          <div style={{ color: 'rgba(255,255,255,0.72)', fontSize: 12 }}>
+            {historyIndex}/{Math.max(0, history.length - 1)}
+          </div>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 180, overflowY: 'auto' }}>
+          {history.map((entry, index) => {
+            const active = index === historyIndex;
+            const future = index > historyIndex;
+            return (
+              <button
+                key={index}
+                onClick={() => onNavigateHistory(index)}
+                style={{
+                  border: `1px solid ${active ? 'rgba(255,255,255,0.55)' : 'rgba(255,255,255,0.10)'}`,
+                  background: active ? 'rgba(255,255,255,0.18)' : future ? 'rgba(0,0,0,0.10)' : 'rgba(0,0,0,0.16)',
+                  color: future ? 'rgba(255,255,255,0.55)' : '#fff',
+                  borderRadius: 7,
+                  padding: '6px 7px',
+                  textAlign: 'left',
+                  cursor: 'pointer',
+                  fontFamily: 'inherit',
+                  fontSize: 12,
+                  lineHeight: 1.25,
+                }}
+              >
+                {historyLabel(entry, index)}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {openingGuide && openingGuide.phase !== 'endgame' && (
+        <OpeningGuidePanel guide={openingGuide} />
+      )}
+
       {status.type === 'playing' && (
         <div style={{
           background: 'rgba(255,255,255,0.12)',
@@ -100,47 +187,407 @@ export function GameInfo({
           color: 'rgba(255,255,255,0.85)',
         }}>
           <div style={{ fontWeight: 700, marginBottom: 4, color: '#fff' }}>Solver</div>
+          <div style={{ marginBottom: 4, color: 'rgba(255,255,255,0.72)' }}>
+            {solverSource === 'server' ? 'Node service' : solverSource === 'browser' ? 'Browser fallback' : 'Connecting...'}
+          </div>
           {solverDepth === 0
-            ? 'Calculating…'
+            ? 'Calculating...'
             : solverComplete
-            ? `Perfect analysis (depth ${solverDepth})`
-            : `Searching depth ${solverDepth}…`}
+            ? `Solved with best play (depth ${solverDepth})`
+            : `Searching depth ${solverDepth} of ${movesLeft}...`}
+
+          {solverStats && (
+            <div style={{ marginTop: 6, fontSize: 12, color: 'rgba(255,255,255,0.78)', lineHeight: 1.45 }}>
+              <div>Nodes: {solverStats.nodesVisited.toLocaleString()}</div>
+              <div>Cache hits: {solverStats.cacheHits.toLocaleString()}</div>
+              <div>Cache stores: {solverStats.cacheStores.toLocaleString()}</div>
+              <div>Elapsed: {formatElapsed(solverStats.elapsedMs)}</div>
+            </div>
+          )}
+
+          {searchEstimate && (
+            <div style={{
+              marginTop: 8,
+              padding: '7px 8px',
+              borderRadius: 8,
+              background: 'rgba(0,0,0,0.14)',
+              border: '1px solid rgba(255,255,255,0.09)',
+              fontSize: 12,
+              lineHeight: 1.45,
+            }}>
+              <div>Speed: {searchEstimate.nodesPerSecond}/s</div>
+              <div>Last depth: {searchEstimate.lastDepth}</div>
+              <div>Next depth ETA: {searchEstimate.nextDepth}</div>
+              <div>Full rough ETA: {searchEstimate.fullSolve}</div>
+              <div>Worst tree: {searchEstimate.worstTree}</div>
+            </div>
+          )}
 
           {bestHint && (
             <div style={{ marginTop: 6, fontSize: 12 }}>
-              Best move:{' '}
-              <span style={{
-                color: bestHint.outcome === 'win' ? '#6fff8e'
-                  : bestHint.outcome === 'loss' ? '#ff7070' : '#ffe566',
-                fontWeight: 700,
-              }}>
-                {bestHint.outcome === 'win' ? `Win in ${bestHint.movesToEnd}`
-                  : bestHint.outcome === 'loss' ? `Loss in ${bestHint.movesToEnd}`
-                  : 'Draw'}
+              Best move: R{bestHint.row + 1} C{bestHint.col + 1}{' '}
+              <span style={{ color: analysisColor(bestHint), fontWeight: 700 }}>
+                {analysisLabel(bestHint)}
               </span>
+            </div>
+          )}
+
+          {openingHints.length > 0 && (
+            <div style={{
+              marginTop: 10,
+              padding: '8px 10px',
+              borderRadius: 10,
+              background: 'rgba(0,0,0,0.14)',
+              border: '1px solid rgba(255,255,255,0.10)',
+            }}>
+              <div style={{ fontWeight: 700, color: '#fff', marginBottom: 5 }}>Opening candidates</div>
+              <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.72)', marginBottom: 8 }}>
+                Best-ranked moves for the current early position.
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {openingHints.map(h => (
+                  <div
+                    key={`open-${h.row},${h.col}`}
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      gap: 8,
+                      fontSize: 12,
+                    }}
+                  >
+                    <span style={{ color: '#fff', fontWeight: 700 }}>
+                      R{h.row + 1} C{h.col + 1}
+                    </span>
+                    <span style={{ color: analysisColor(h), fontWeight: 700 }}>
+                      {analysisLabel(h)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {sortedHints.length > 0 && (
+            <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 5, maxHeight: 210, overflowY: 'auto' }}>
+              {sortedHints.map(h => (
+                <div
+                  key={`${h.row},${h.col}`}
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    gap: 10,
+                    padding: '5px 7px',
+                    borderRadius: 7,
+                    background: 'rgba(0,0,0,0.16)',
+                    border: `1px solid ${h.proven ? 'rgba(255,255,255,0.18)' : 'rgba(255,255,255,0.08)'}`,
+                  }}
+                >
+                  <span style={{ color: '#fff', fontWeight: 700 }}>R{h.row + 1} C{h.col + 1}</span>
+                  <span style={{ color: analysisColor(h), fontWeight: 700 }}>{analysisLabel(h)}</span>
+                </div>
+              ))}
             </div>
           )}
         </div>
       )}
 
-      {/* Hints toggle */}
       {status.type === 'playing' && (
         <button onClick={onToggleHints} style={btnStyle(hintsEnabled ? '#4caf50' : '#666')}>
-          {hintsEnabled ? '🟢 Hints On' : '⚫ Hints Off'}
+          {hintsEnabled ? 'Hints On' : 'Hints Off'}
         </button>
       )}
 
-      {/* Edit position */}
-      <button onClick={onEditPosition} style={btnStyle('#7b5ea7')}>
-        ✏️ Edit Position
-      </button>
-
-      {/* New game */}
       <button onClick={onNewGame} style={btnStyle('#e85d9a')}>
         New Game
       </button>
     </div>
   );
+}
+
+function historyLabel(entry: TimelineEntry, index: number): string {
+  if (!entry.move) return 'Start position';
+  const move = entry.move;
+  const player = move.player === 'vanilla' ? 'Vanilla' : 'Chocolate';
+  const suffix = [
+    move.wasDisobedience ? 'disobey' : '',
+    move.flipped.length > 0 ? `${move.flipped.length} flipped` : '',
+  ].filter(Boolean).join(', ');
+
+  return `${index}. ${player} R${move.row + 1} C${move.col + 1}${suffix ? ` (${suffix})` : ''}`;
+}
+
+function OpeningGuidePanel({ guide }: { guide: OpeningGuide }) {
+  const top = guide.topMoves.slice(0, 5);
+  const centerFour = guide.centerFour
+    .slice()
+    .sort((a, b) => b.score - a.score || a.row - b.row || a.col - b.col);
+  const best = top[0] ?? null;
+
+  return (
+    <div style={{
+      background: 'rgba(255,255,255,0.12)',
+      borderRadius: 12,
+      padding: '10px 12px',
+      backdropFilter: 'blur(8px)',
+      border: '1px solid rgba(255,255,255,0.25)',
+      color: 'rgba(255,255,255,0.85)',
+      fontSize: 12,
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+        <div style={{ fontWeight: 800, color: '#fff', fontSize: 13 }}>Opening Guide</div>
+        <div style={{ color: 'rgba(255,255,255,0.68)', textTransform: 'capitalize' }}>{guide.phase}</div>
+      </div>
+
+      {best && (
+        <div style={{
+          padding: '7px 8px',
+          borderRadius: 8,
+          background: 'rgba(0,0,0,0.16)',
+          border: '1px solid rgba(255,255,255,0.10)',
+          marginBottom: 8,
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 5 }}>
+            <span style={{ color: '#fff', fontWeight: 800 }}>Heuristic pick: {moveName(best)}</span>
+            <span style={{ color: '#93f0b5', fontWeight: 800 }}>{best.score}</span>
+          </div>
+          <TagList tags={best.tags} />
+        </div>
+      )}
+
+      {centerFour.length > 0 && (
+        <div style={{ marginBottom: 9 }}>
+          <div style={{ color: 'rgba(255,255,255,0.72)', marginBottom: 5, fontWeight: 700 }}>Center four</div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 5 }}>
+            {centerFour.map(move => (
+              <MoveInsightMini key={`center-${move.row},${move.col}`} move={move} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div style={{ color: 'rgba(255,255,255,0.72)', marginBottom: 5, fontWeight: 700 }}>Top themes</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+        {top.map(move => (
+          <div
+            key={`guide-${move.row},${move.col}`}
+            style={{
+              display: 'grid',
+              gridTemplateColumns: '58px 1fr 34px',
+              gap: 7,
+              alignItems: 'center',
+              padding: '5px 6px',
+              borderRadius: 7,
+              background: 'rgba(0,0,0,0.13)',
+            }}
+          >
+            <span style={{ color: '#fff', fontWeight: 800 }}>{moveName(move)}</span>
+            <span style={{ color: 'rgba(255,255,255,0.72)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {moveSummary(move)}
+            </span>
+            <span style={{ color: '#93f0b5', textAlign: 'right', fontWeight: 800 }}>{move.score}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MoveInsightMini({ move }: { move: OpeningMoveInsight }) {
+  return (
+    <div style={{
+      borderRadius: 7,
+      padding: '5px 6px',
+      background: 'rgba(0,0,0,0.13)',
+      border: '1px solid rgba(255,255,255,0.08)',
+      minWidth: 0,
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 4 }}>
+        <span style={{ color: '#fff', fontWeight: 800 }}>{moveName(move)}</span>
+        <span style={{ color: '#93f0b5', fontWeight: 800 }}>{move.score}</span>
+      </div>
+      <div style={{ color: 'rgba(255,255,255,0.64)', marginTop: 2 }}>
+        {move.direction} / {move.replyOptions || 'free'} replies
+      </div>
+    </div>
+  );
+}
+
+function TagList({ tags }: { tags: string[] }) {
+  if (tags.length === 0) return null;
+
+  return (
+    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+      {tags.map(tag => (
+        <span
+          key={tag}
+          style={{
+            borderRadius: 999,
+            padding: '2px 6px',
+            background: 'rgba(255,255,255,0.13)',
+            color: 'rgba(255,255,255,0.82)',
+            fontSize: 11,
+            fontWeight: 700,
+          }}
+        >
+          {tag}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function moveName(move: OpeningMoveInsight): string {
+  return `R${move.row + 1} C${move.col + 1}`;
+}
+
+function moveSummary(move: OpeningMoveInsight): string {
+  const parts = [
+    `${move.linePotential} lines`,
+    `${move.replyOptions || 'free'} replies`,
+  ];
+  if (move.flipsNow > 0) parts.push(`${move.flipsNow} flips`);
+  if (move.maxFlipRisk > 0) parts.push(`${move.maxFlipRisk} risk`);
+  return parts.join(' / ');
+}
+
+interface SearchEstimate {
+  nodesPerSecond: string;
+  lastDepth: string;
+  nextDepth: string;
+  fullSolve: string;
+  worstTree: string;
+}
+
+function estimateSearch(
+  stats: SolverProgress | null,
+  solverDepth: number,
+  movesLeft: number,
+): SearchEstimate | null {
+  if (!stats || stats.elapsedMs <= 0 || stats.nodesVisited <= 0 || solverDepth <= 0) return null;
+
+  const nodesPerSecond = stats.nodesVisited / (stats.elapsedMs / 1000);
+  const timings = stats.depthTimings ?? [];
+  const last = timings[timings.length - 1] ?? null;
+  const previous = timings.length >= 2 ? timings[timings.length - 2] : null;
+  const observedBranch = previous && previous.depthNodes > 0
+    ? clamp(last!.depthNodes / previous.depthNodes, 1.05, 40)
+    : clamp(Math.pow(Math.max(stats.nodesVisited, 1), 1 / Math.max(solverDepth, 1)), 1.05, 40);
+  const lastDepthMs = Math.max(1, last?.depthElapsedMs ?? stats.elapsedMs);
+  const nextDepthMs = lastDepthMs * observedBranch;
+  const remainingDepths = Math.max(0, movesLeft - solverDepth);
+  const fullMs = estimateGeometricMs(lastDepthMs, observedBranch, remainingDepths);
+  const logWorstNodes = estimateWorstCaseLog10Nodes(movesLeft, solverDepth);
+  const logWorstSeconds = logWorstNodes - Math.log10(Math.max(nodesPerSecond, 1));
+
+  return {
+    nodesPerSecond: formatCompactNumber(nodesPerSecond),
+    lastDepth: last ? `${formatElapsed(last.depthElapsedMs)} (${formatCompactNumber(last.depthNodes)} nodes)` : formatElapsed(stats.elapsedMs),
+    nextDepth: formatElapsed(nextDepthMs),
+    fullSolve: fullMs === Infinity ? 'very large' : formatElapsed(fullMs),
+    worstTree: formatLogDuration(logWorstSeconds),
+  };
+}
+
+function estimateGeometricMs(lastDepthMs: number, observedBranch: number, remainingDepths: number): number {
+  if (remainingDepths <= 0) return 0;
+  let total = 0;
+  let next = lastDepthMs;
+
+  for (let i = 0; i < remainingDepths; i++) {
+    next *= observedBranch;
+    total += next;
+    if (!Number.isFinite(total) || total > 1e18) return Infinity;
+  }
+
+  return total;
+}
+
+function estimateWorstCaseLog10Nodes(movesLeft: number, solverDepth: number): number {
+  let log = 0;
+  for (let remaining = Math.max(1, movesLeft - solverDepth); remaining > 0; remaining--) {
+    log += Math.log10(remaining);
+  }
+  return log;
+}
+
+function formatCompactNumber(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+  if (value >= 10) return value.toFixed(0);
+  return value.toFixed(1);
+}
+
+function formatLogDuration(logSeconds: number): string {
+  if (!Number.isFinite(logSeconds)) return 'very large';
+  if (logSeconds < 6) return formatElapsed(Math.pow(10, logSeconds) * 1000);
+
+  const logYears = logSeconds - Math.log10(60 * 60 * 24 * 365);
+  if (logYears < 6) {
+    const years = Math.pow(10, logYears);
+    return `${formatCompactNumber(years)} years`;
+  }
+  return `~10^${Math.round(logYears)} years`;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function formatElapsed(ms: number): string {
+  if (ms === 0) return 'complete';
+  if (!Number.isFinite(ms)) return 'very large';
+  if (ms < 1000) return `${ms} ms`;
+  const seconds = ms / 1000;
+  if (seconds < 60) return `${seconds.toFixed(1)} s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    const rem = (seconds % 60).toFixed(0).padStart(2, '0');
+    return `${minutes}m ${rem}s`;
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) {
+    const rem = (minutes % 60).toString().padStart(2, '0');
+    return `${hours}h ${rem}m`;
+  }
+  const days = Math.floor(hours / 24);
+  if (days < 365) return `${days}d ${hours % 24}h`;
+  const years = days / 365;
+  return `${formatCompactNumber(years)} years`;
+}
+
+function compareAnalyses(a: MoveAnalysis, b: MoveAnalysis): number {
+  const rank = (h: MoveAnalysis) =>
+    h.outcome === 'win' ? 0 :
+    h.outcome === 'draw' ? 1 :
+    h.outcome === 'unknown' ? 2 :
+    3;
+
+  const ar = rank(a), br = rank(b);
+  if (ar !== br) return ar - br;
+  if (a.outcome === 'win' && b.outcome === 'win') {
+    return (a.movesToEnd ?? Number.MAX_SAFE_INTEGER) - (b.movesToEnd ?? Number.MAX_SAFE_INTEGER);
+  }
+  if (a.outcome === 'loss' && b.outcome === 'loss') {
+    return (b.movesToEnd ?? 0) - (a.movesToEnd ?? 0);
+  }
+  if (a.outcome === 'unknown' && b.outcome === 'unknown') {
+    return b.score - a.score;
+  }
+  return a.row - b.row || a.col - b.col;
+}
+
+function analysisLabel(h: MoveAnalysis): string {
+  if (h.outcome === 'win') return `Win in ${h.movesToEnd}`;
+  if (h.outcome === 'loss') return `Loss in ${h.movesToEnd}`;
+  if (h.outcome === 'draw') return 'Draw';
+  return `Searching d${h.depth}`;
+}
+
+function analysisColor(h: MoveAnalysis): string {
+  if (h.outcome === 'win') return '#6fff8e';
+  if (h.outcome === 'loss') return '#ff7070';
+  if (h.outcome === 'draw') return '#ffe566';
+  return '#9ed0ff';
 }
 
 function PieceCount({ player, left, current }: { player: 'vanilla' | 'chocolate'; left: number; current: 'vanilla' | 'chocolate' }) {
@@ -176,5 +623,21 @@ function btnStyle(bg: string): React.CSSProperties {
     fontFamily: 'inherit',
     boxShadow: '0 3px 8px rgba(0,0,0,0.25)',
     transition: 'opacity 0.15s',
+  };
+}
+
+function smallBtnStyle(bg: string, disabled = false): React.CSSProperties {
+  return {
+    background: disabled ? 'rgba(255,255,255,0.10)' : bg,
+    color: disabled ? 'rgba(255,255,255,0.35)' : '#fff',
+    border: '1px solid rgba(255,255,255,0.18)',
+    borderRadius: 8,
+    padding: '7px 8px',
+    minHeight: 34,
+    fontSize: 12,
+    fontWeight: 700,
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    fontFamily: 'inherit',
+    boxShadow: disabled ? 'none' : '0 2px 5px rgba(0,0,0,0.18)',
   };
 }

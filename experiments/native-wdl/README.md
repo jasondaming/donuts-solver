@@ -1,7 +1,7 @@
 # Native win/draw/loss solver (prototype)
 
 Experiment from 2026-10-18 that tested whether a full solve is possible. It is, in seconds per board.
-This folder is not part of the app build. It is a starting point for replacing the app's solver.
+This folder is not part of the app build. The app's solver now uses `engine/wdl.c`, which grew out of this prototype and runs as WebAssembly (see the main README). `crosscheck.ts verify` checks that engine against a plain JS search.
 
 ## Results
 

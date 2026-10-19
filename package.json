@@ -11,6 +11,8 @@
     "dev": "vite",
     "solver": "node --experimental-strip-types server/server.ts",
     "check:server": "tsc -p tsconfig.server.json",
+    "build:engine": "node scripts/build-engine.mjs",
+    "validate": "node --experimental-strip-types --no-warnings scripts/validate-engine.ts",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview"

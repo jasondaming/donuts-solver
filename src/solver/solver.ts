@@ -1,434 +1,205 @@
+// Perfect-play analysis of every legal move, shared by the browser and the Node service.
+//
+// Pass 1 proves each move a win, draw, or loss with the WebAssembly engine (engine/wdl.c): a full-depth
+// win/draw/loss search, so every answer is exact and no depth limit is involved.
+// Pass 2 fills in "win in N" / "loss in N" for the winning and losing moves with node-budgeted searches;
+// a move whose budget runs out keeps its proven outcome with movesToEnd = null.
+//
+// Moves are spread over a pool of engines (one per worker). The newest analysis gets idle engines first.
 import type { GameState, MoveAnalysis, SolverProgress } from '../game/types';
-import { getValidMoves, applyMove } from '../game/engine.ts';
-import { encodeStateKey, invertMove, transformMove } from './stateKey.ts';
-import type { ExactCacheLike } from './exactCacheTypes.ts';
-
-const WIN = 10000;
-const INF = 999999;
-
-// Transposition table entry
-interface TEntry {
-  score: number;
-  depth: number;
-  type: 'exact' | 'lower' | 'upper';
-  bestMove: [number, number] | null;
-}
-
-const transTable = new Map<string, TEntry>();
-
-interface SearchValue {
-  score: number;
-  exact: boolean;
-  bestMove: [number, number] | null;
-}
-
-interface SearchContext {
-  cache?: ExactCacheLike;
-  stats?: SolverProgress;
-}
-
-// Returns score from vanilla's perspective.
-// +WIN - pliesFromRoot = vanilla wins sooner = better.
-// -(WIN - pliesFromRoot) = chocolate wins sooner = worse for vanilla.
-function minimax(
-  state: GameState,
-  depth: number,
-  alpha: number,
-  beta: number,
-  pliesFromRoot: number,
-  cancelToken: { cancelled: boolean },
-  context: SearchContext,
-): SearchValue {
-  if (cancelToken.cancelled) return { score: 0, exact: false, bestMove: null };
-  if (context.stats) context.stats.nodesVisited += 1;
-
-  if (state.status.type !== 'playing') {
-    if (state.status.type === 'draw') return { score: 0, exact: true, bestMove: null };
-    const score = WIN - pliesFromRoot;
-    return { score: state.status.winner === 'vanilla' ? score : -score, exact: true, bestMove: null };
-  }
-
-  if (depth === 0) return { score: 0, exact: false, bestMove: null };
-
-  const encoded = encodeStateKey(state);
-  const key = encoded.key;
-  const symmetry = encoded.symmetry;
-  const cachedExact = context.cache?.get(key);
-  if (cachedExact && cachedExact.depth >= depth) {
-    if (context.stats) context.stats.cacheHits += 1;
-    if (cachedExact.type === 'exact') {
-      return {
-        score: cachedExact.score,
-        exact: true,
-        bestMove: cachedExact.bestMove ? invertMove(cachedExact.bestMove, symmetry) : null,
-      };
-    }
-    if (cachedExact.type === 'lower') alpha = Math.max(alpha, cachedExact.score);
-    if (cachedExact.type === 'upper') beta = Math.min(beta, cachedExact.score);
-    if (alpha >= beta) {
-      return {
-        score: cachedExact.score,
-        exact: false,
-        bestMove: cachedExact.bestMove ? invertMove(cachedExact.bestMove, symmetry) : null,
-      };
-    }
-  }
-
-  const cached = transTable.get(key);
-  if (cached && cached.depth >= depth) {
-    if (cached.type === 'exact') {
-      return {
-        score: cached.score,
-        exact: true,
-        bestMove: cached.bestMove ? invertMove(cached.bestMove, symmetry) : null,
-      };
-    }
-    if (cached.type === 'lower') alpha = Math.max(alpha, cached.score);
-    if (cached.type === 'upper') beta = Math.min(beta, cached.score);
-    if (alpha >= beta) {
-      return {
-        score: cached.score,
-        exact: false,
-        bestMove: cached.bestMove ? invertMove(cached.bestMove, symmetry) : null,
-      };
-    }
-  }
-
-  const moves = getValidMoves(state);
-  const isMaximizing = state.currentPlayer === 'vanilla';
-
-  // Move ordering: check for immediate wins first
-  const orderedMoves = orderMoves(
-    state,
-    moves,
-    cached?.bestMove ? invertMove(cached.bestMove, symmetry) : null,
-  );
-
-  let bestScore = isMaximizing ? -INF : INF;
-  let bestMove: [number, number] | null = null;
-  const originalAlpha = alpha;
-  const originalBeta = beta;
-  let allChildrenExact = true;
-
-  for (const [row, col] of orderedMoves) {
-    if (cancelToken.cancelled) return { score: 0, exact: false, bestMove: null };
-
-    const next = applyMove(state, row, col);
-    const child = minimax(next, depth - 1, alpha, beta, pliesFromRoot + 1, cancelToken, context);
-    const score = child.score;
-    if (!child.exact) allChildrenExact = false;
-
-    if (isMaximizing) {
-      if (score > bestScore) {
-        bestScore = score;
-        bestMove = [row, col];
-      }
-      if (score > alpha) alpha = score;
-    } else {
-      if (score < bestScore) {
-        bestScore = score;
-        bestMove = [row, col];
-      }
-      if (score < beta) beta = score;
-    }
-
-    if (alpha >= beta) break;
-  }
-
-  const entryType: TEntry['type'] = allChildrenExact
-    ? 'exact'
-    : bestScore <= originalAlpha
-    ? 'upper'
-    : bestScore >= originalBeta
-    ? 'lower'
-    : 'exact';
-  transTable.set(key, {
-    score: bestScore,
-    depth,
-    type: entryType,
-    bestMove: bestMove ? transformMove(bestMove, symmetry) : null,
-  });
-  const exact = allChildrenExact;
-  if (context.cache) {
-    context.cache.set(key, {
-      score: bestScore,
-      depth,
-      bestMove: bestMove ? transformMove(bestMove, symmetry) : null,
-      type: entryType,
-      updatedAt: Date.now(),
-    });
-    if (context.stats) context.stats.cacheStores += 1;
-  }
-  return { score: bestScore, exact, bestMove };
-}
-
-function orderMoves(
-  state: GameState,
-  moves: [number, number][],
-  preferredMove: [number, number] | null,
-): [number, number][] {
-  // Score each move heuristically from vanilla's perspective.
-  const scored = moves.map(([r, c]) => {
-    const next = applyMove(state, r, c);
-    let score = 0;
-    if (next.status.type === 'won') {
-      score += next.status.winner === 'vanilla' ? 10000 : -10000;
-    }
-    const flipped = countFlipped(state, next);
-    score += (state.currentPlayer === 'vanilla' ? 1 : -1) * flipped * 100;
-    const dr = r - 2.5, dc = c - 2.5;
-    score += (state.currentPlayer === 'vanilla' ? 1 : -1)
-      * Math.max(0, 4 - Math.sqrt(dr*dr + dc*dc)) * 10;
-    if (preferredMove && preferredMove[0] === r && preferredMove[1] === c) {
-      score += 5000;
-    }
-    return { r, c, score };
-  });
-
-  scored.sort((a, b) =>
-    state.currentPlayer === 'vanilla' ? b.score - a.score : a.score - b.score
-  );
-  return scored.map(s => [s.r, s.c] as [number, number]);
-}
-
-function orderRootMoves(
-  state: GameState,
-  moves: [number, number][],
-  analyses: MoveAnalysis[] | null,
-): [number, number][] {
-  if (!analyses || analyses.length === 0) {
-    return orderMoves(state, moves, null);
-  }
-
-  const prior = new Map(analyses.map(a => [`${a.row},${a.col}`, a]));
-  return [...moves].sort((a, b) => compareRootAnalyses(prior.get(`${a[0]},${a[1]}`), prior.get(`${b[0]},${b[1]}`), state.currentPlayer));
-}
-
-function compareRootAnalyses(
-  a: MoveAnalysis | undefined,
-  b: MoveAnalysis | undefined,
-  currentPlayer: 'vanilla' | 'chocolate',
-): number {
-  if (!a && !b) return 0;
-  if (!a) return 1;
-  if (!b) return -1;
-
-  const rank = (h: MoveAnalysis) =>
-    h.outcome === 'win' ? 0 :
-    h.outcome === 'draw' ? 1 :
-    h.outcome === 'unknown' ? 2 :
-    3;
-
-  const ar = rank(a), br = rank(b);
-  if (ar !== br) return ar - br;
-  if (a.outcome === 'win' && b.outcome === 'win') {
-    return currentPlayer === 'vanilla'
-      ? (a.movesToEnd ?? Number.MAX_SAFE_INTEGER) - (b.movesToEnd ?? Number.MAX_SAFE_INTEGER)
-      : (a.movesToEnd ?? Number.MAX_SAFE_INTEGER) - (b.movesToEnd ?? Number.MAX_SAFE_INTEGER);
-  }
-  if (a.outcome === 'loss' && b.outcome === 'loss') {
-    return currentPlayer === 'vanilla'
-      ? (b.movesToEnd ?? 0) - (a.movesToEnd ?? 0)
-      : (b.movesToEnd ?? 0) - (a.movesToEnd ?? 0);
-  }
-  if (a.outcome === 'unknown' && b.outcome === 'unknown') {
-    return b.score - a.score;
-  }
-  return a.row - b.row || a.col - b.col;
-}
-
-function countFlipped(before: GameState, after: GameState): number {
-  let count = 0;
-  const player = before.currentPlayer;
-  const opp = player === 'vanilla' ? 'chocolate' : 'vanilla';
-  for (let r = 0; r < 6; r++) {
-    for (let c = 0; c < 6; c++) {
-      if (before.board[r][c].piece === opp && after.board[r][c].piece === player) count++;
-    }
-  }
-  return count;
-}
+import { applyMove, getValidMoves } from '../game/engine.ts';
+import { toEnginePosition, type EnginePosition, type EngineReply, type EngineTask } from './wdlEngine.ts';
 
 export interface SolverResult {
   analyses: MoveAnalysis[];
-  depth: number;
-  complete: boolean;
+  depth: number;      // plies left in the game: every value is searched to the end
+  complete: boolean;  // both passes finished
   stats?: SolverProgress;
+}
+
+export interface EngineRunner {
+  run(position: EnginePosition, task: EngineTask): Promise<EngineReply>;
 }
 
 export interface AnalyzeOptions {
-  startDepth?: number;
-  initialResult?: SolverResult | null;
-  cache?: ExactCacheLike;
-  stats?: SolverProgress;
+  distances?: boolean;  // run the "win/loss in N" pass (default true)
 }
 
-export function analyzePosition(
-  state: GameState,
-  maxDepth: number,
-  cancelToken: { cancelled: boolean },
-  onPartial?: (result: SolverResult) => void,
-  options: AnalyzeOptions = {},
-): SolverResult {
-  transTable.clear();
-  const startedAt = Date.now();
-  const stats = options.stats ?? {
-    nodesVisited: 0,
-    cacheHits: 0,
-    cacheStores: 0,
-    elapsedMs: 0,
-  };
+export interface SolveHandle {
+  done: Promise<SolverResult>;
+  current(): SolverResult;
+  cancel(): void;
+}
 
-  const moves = getValidMoves(state);
-  if (moves.length === 0) {
-    stats.elapsedMs = Date.now() - startedAt;
-    return { analyses: [], depth: 0, complete: true, stats: { ...stats } };
-  }
+// Distance searches per move. About a second of engine time; larger N near the empty board stays null.
+export const DISTANCE_BUDGET = 3_000_000;
+const WIN = 10000;
 
-  const movesLeft = state.vanillaLeft + state.chocolateLeft;
-  const isVanilla = state.currentPlayer === 'vanilla';
-  let rootOrder = orderRootMoves(state, moves, null);
+class Job {
+  readonly analyses: MoveAnalysis[];
+  readonly position: EnginePosition;
+  private readonly valueQueue: number[] = [];
+  private readonly distanceQueues: number[][];
+  private inFlight = 0;
+  private nodes = 0;
+  private readonly startedAt = Date.now();
+  private finished = false;
+  cancelled = false;
+  readonly done: Promise<SolverResult>;
+  private resolve!: (result: SolverResult) => void;
+  private reject!: (error: unknown) => void;
+  private readonly onUpdate?: (result: SolverResult) => void;
 
-  const initialResult = options.initialResult ?? null;
-  let currentAnalyses: MoveAnalysis[] = initialResult?.analyses ?? moves.map(([r, c]) => ({
-    row: r,
-    col: c,
-    outcome: 'unknown',
-    movesToEnd: null,
-    depth: 0,
-    proven: false,
-    score: 0,
-  }));
+  private readonly distances: boolean;
 
-  if (initialResult && (initialResult.complete || initialResult.depth >= maxDepth)) {
-    stats.elapsedMs = Date.now() - startedAt;
-    return { ...initialResult, stats: { ...stats } };
-  }
-
-  const startDepth = Math.max(1, options.startDepth ?? 1);
-  for (let depth = startDepth; depth <= maxDepth; depth++) {
-    if (cancelToken.cancelled) break;
-
-    const depthStartedAt = Date.now();
-    const depthStartNodes = stats.nodesVisited;
-    const depthStartCacheHits = stats.cacheHits;
-    const depthStartCacheStores = stats.cacheStores;
-    const analyses: MoveAnalysis[] = [];
-
-    for (const [row, col] of rootOrder) {
-      if (cancelToken.cancelled) break;
-
+  constructor(state: GameState, runnerCount: number, onUpdate?: (result: SolverResult) => void, options: AnalyzeOptions = {}) {
+    this.onUpdate = onUpdate;
+    this.distances = options.distances ?? true;
+    this.done = new Promise((resolve, reject) => { this.resolve = resolve; this.reject = reject; });
+    this.position = toEnginePosition(state);
+    this.distanceQueues = Array.from({ length: runnerCount }, () => []);
+    const remaining = this.position.remaining;
+    this.analyses = getValidMoves(state).map(([row, col]) => {
       const next = applyMove(state, row, col);
-
-      let outcome: MoveAnalysis['outcome'];
-      let movesToEnd: number | null;
-      let proven = false;
-      let score = 0;
-
-      if (next.status.type !== 'playing') {
-        proven = true;
-        movesToEnd = 1;
-        if (next.status.type === 'draw') {
-          outcome = 'draw';
-        } else {
-          outcome = next.status.winner === state.currentPlayer ? 'win' : 'loss';
-          score = outcome === 'win' ? WIN - 1 : -(WIN - 1);
-        }
-      } else {
-        const vanillaEval = minimax(next, depth - 1, -INF, INF, 1, cancelToken, {
-          cache: options.cache,
-          stats,
-        });
-        score = isVanilla ? vanillaEval.score : -vanillaEval.score;
-
-        if (score === 0) {
-          if (vanillaEval.exact) {
-            proven = true;
-            outcome = 'draw';
-          } else {
-            proven = false;
-            outcome = 'unknown';
-          }
-          movesToEnd = null;
-        } else if (score > 0) {
-          proven = true;
-          outcome = 'win';
-          movesToEnd = WIN - score;
-        } else {
-          proven = true;
-          outcome = 'loss';
-          movesToEnd = WIN + score;
-        }
+      if (next.status.type === 'playing') {
+        this.valueQueue.push(row * 6 + col);
+        return { row, col, outcome: 'unknown', movesToEnd: null, depth: remaining, proven: false, score: 0 };
       }
+      const outcome = next.status.type === 'draw' ? 'draw' : next.status.winner === state.currentPlayer ? 'win' : 'loss';
+      return { row, col, outcome, movesToEnd: 1, depth: remaining, proven: true, score: scoreOf(outcome, 1) };
+    });
+  }
 
-      analyses.push({ row, col, outcome, movesToEnd, depth, proven, score });
+  get idle(): boolean {
+    return this.finished || this.cancelled;
+  }
+
+  nextTask(runner: number): EngineTask | null {
+    if (this.idle) return null;
+    const value = this.valueQueue.shift();
+    if (value !== undefined) return this.take({ kind: 'value', cell: value });
+    // Prefer distance searches on moves this engine solved: its table already holds that subtree.
+    const queue = this.distanceQueues[runner].length ? this.distanceQueues[runner] : this.distanceQueues.find(q => q.length);
+    const cell = queue?.shift();
+    if (cell === undefined) return null;
+    const value0 = this.find(cell).outcome === 'win' ? 1 : -1;
+    return this.take({ kind: 'distance', cell, value: value0, budget: DISTANCE_BUDGET });
+  }
+
+  complete(runner: number, task: EngineTask, reply: EngineReply): void {
+    this.inFlight--;
+    this.nodes += reply.nodes;
+    if (this.idle) return;
+    const a = this.find(task.cell);
+    if (task.kind === 'value') {
+      a.outcome = reply.result > 0 ? 'win' : reply.result < 0 ? 'loss' : 'draw';
+      a.proven = true;
+      a.score = scoreOf(a.outcome, null);
+      if (a.outcome !== 'draw' && this.distances) this.distanceQueues[runner].push(task.cell);
+    } else if (reply.result > 0) {
+      a.movesToEnd = reply.result;
+      a.score = scoreOf(a.outcome, reply.result);
     }
+    this.publish();
+  }
 
-    if (!cancelToken.cancelled) {
-      currentAnalyses = analyses;
-      rootOrder = orderRootMoves(state, moves, analyses);
-      stats.elapsedMs = Date.now() - startedAt;
-      stats.depthTimings = [
-        ...(stats.depthTimings ?? []).filter(timing => timing.depth !== depth),
-        {
-          depth,
-          depthNodes: stats.nodesVisited - depthStartNodes,
-          depthCacheHits: stats.cacheHits - depthStartCacheHits,
-          depthCacheStores: stats.cacheStores - depthStartCacheStores,
-          depthElapsedMs: Date.now() - depthStartedAt,
-          nodesVisited: stats.nodesVisited,
-          elapsedMs: stats.elapsedMs,
-        },
-      ].slice(-12);
-      const result: SolverResult = {
-        analyses,
-        depth,
-        complete: depth >= movesLeft || analyses.every(a => a.proven),
-        stats: { ...stats },
-      };
-      if (onPartial) onPartial(result);
+  fail(error: unknown): void {
+    if (this.idle) return;
+    this.finished = true;
+    this.reject(error);
+  }
 
-      if (analyses.every(a => a.proven)) {
-        return { ...result, complete: true };
-      }
-
-      if (result.complete) break;
+  publish(): void {
+    const result = this.current();
+    this.onUpdate?.(result);
+    if (result.complete && !this.finished) {
+      this.finished = true;
+      this.resolve(result);
     }
   }
 
-  return {
-    analyses: currentAnalyses,
-    depth: currentAnalyses[0]?.depth ?? 0,
-    complete: !cancelToken.cancelled && (
-      currentAnalyses[0]?.depth >= movesLeft || currentAnalyses.every(a => a.proven)
-    ),
-    stats: { ...stats, elapsedMs: Date.now() - startedAt },
-  };
+  current(): SolverResult {
+    const pending = this.valueQueue.length + this.distanceQueues.reduce((n, q) => n + q.length, 0) + this.inFlight;
+    const movesSolved = this.analyses.filter(a => a.proven).length;
+    return {
+      analyses: this.analyses.map(a => ({ ...a })),
+      depth: this.position.remaining,
+      complete: pending === 0,
+      stats: {
+        nodesVisited: this.nodes,
+        elapsedMs: Date.now() - this.startedAt,
+        movesSolved,
+        moveCount: this.analyses.length,
+        distancesPending: pending - (this.analyses.length - movesSolved),
+      },
+    };
+  }
+
+  private take(task: EngineTask): EngineTask {
+    this.inFlight++;
+    return task;
+  }
+
+  private find(cell: number): MoveAnalysis {
+    return this.analyses.find(a => a.row * 6 + a.col === cell)!;
+  }
 }
 
-export function getBestMove(state: GameState): [number, number] | null {
-  const moves = getValidMoves(state);
-  if (moves.length === 0) return null;
-  if (moves.length === 1) return moves[0];
+function scoreOf(outcome: MoveAnalysis['outcome'], movesToEnd: number | null): number {
+  const n = movesToEnd ?? 100;
+  return outcome === 'win' ? WIN - n : outcome === 'loss' ? -(WIN - n) : 0;
+}
 
-  const cancel = { cancelled: false };
-  const movesLeft = state.vanillaLeft + state.chocolateLeft;
-  const result = analyzePosition(state, movesLeft, cancel);
+export class SolverPool {
+  private jobs: Job[] = [];   // newest first
+  private readonly runners: EngineRunner[];
+  private readonly busy: boolean[];
 
-  const analyses = result.analyses;
-  const wins = analyses
-    .filter(a => a.outcome === 'win' && a.movesToEnd !== null)
-    .sort((a, b) => a.movesToEnd! - b.movesToEnd!);
-  if (wins.length > 0) return [wins[0].row, wins[0].col];
+  constructor(runners: EngineRunner[]) {
+    this.runners = runners;
+    this.busy = runners.map(() => false);
+  }
 
-  const draws = analyses.filter(a => a.outcome === 'draw');
-  if (draws.length > 0) return [draws[0].row, draws[0].col];
+  analyze(state: GameState, onUpdate?: (result: SolverResult) => void, options?: AnalyzeOptions): SolveHandle {
+    const job = new Job(state, this.runners.length, onUpdate, options);
+    const handle: SolveHandle = {
+      done: job.done,
+      current: () => job.current(),
+      cancel: () => {
+        job.cancelled = true;
+        this.jobs = this.jobs.filter(j => j !== job);
+      },
+    };
+    queueMicrotask(() => job.publish());
+    if (state.status.type !== 'playing') return handle;
+    this.jobs.unshift(job);
+    this.runners.forEach((_, i) => this.pump(i));
+    return handle;
+  }
 
-  const unknowns = analyses.filter(a => a.outcome === 'unknown');
-  if (unknowns.length > 0) return [unknowns[0].row, unknowns[0].col];
+  private pump(runner: number): void {
+    if (this.busy[runner]) return;
+    this.jobs = this.jobs.filter(j => !j.idle);
+    for (const job of this.jobs) {
+      const task = job.nextTask(runner);
+      if (!task) continue;
+      this.busy[runner] = true;
+      this.runners[runner].run(job.position, task).then(
+        reply => job.complete(runner, task, reply),
+        error => job.fail(error),
+      ).finally(() => {
+        this.busy[runner] = false;
+        this.pump(runner);
+      });
+      return;
+    }
+  }
+}
 
-  const losses = analyses
-    .filter(a => a.outcome === 'loss' && a.movesToEnd !== null)
-    .sort((a, b) => b.movesToEnd! - a.movesToEnd!);
-  return [losses[0].row, losses[0].col];
+// Best move for the side to move: fastest win, then a draw, then the longest loss.
+export function pickBestMove(analyses: MoveAnalysis[]): [number, number] | null {
+  const known = analyses.filter(a => a.outcome !== 'unknown');
+  if (known.length === 0) return null;
+  const best = [...known].sort((a, b) => b.score - a.score)[0];
+  return [best.row, best.col];
 }

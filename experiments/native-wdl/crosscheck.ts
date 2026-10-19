@@ -2,9 +2,9 @@
 //   perft  <depth>                 -> node counts from the empty board (compare with `wdl perft`)
 //   dump   <ply> <count> <seed>    -> random positions as move sequences (stdin for `wdl`)
 //   truth  <ply> <count> <seed>    -> "seq;v,v,..." per-move values from plain JS alpha-beta (compare with `wdl values`)
-//   verify <ply> <count> <seed>    -> compare the app's analyzePosition outcomes with that reference
+//   verify <ply> <count> <seed>    -> compare the app's solver (WebAssembly engine pool) with that reference
 import { applyMove, getValidMoves } from '../../src/game/engine.ts';
-import { analyzePosition } from '../../src/solver/solver.ts';
+import { createThreadPool } from '../../server/enginePool.ts';
 import type { Board, GameState } from '../../src/game/types.ts';
 
 const DIRS = [
@@ -83,7 +83,8 @@ if (cmd === 'perft') {
 } else if (cmd === 'verify' || cmd === 'dump' || cmd === 'truth') {
   const ply = Number(a1), count = Number(a2);
   seed = Number(a3 ?? 1);
-  let checked = 0, mismatches = 0, falseDraws = 0, solverMs = 0, solverNodes = 0, partialWrong = 0, earlyComplete = 0;
+  let checked = 0, checkedMoves = 0, mismatches = 0, falseDraws = 0, solverMs = 0, solverNodes = 0;
+  const pool = cmd === 'verify' ? createThreadPool().pool : null!;
   while (checked < count) {
     const pos = randomPosition(ply);
     if (!pos) continue;
@@ -95,36 +96,23 @@ if (cmd === 'perft') {
       continue;
     }
     const t = Date.now();
-    const partials: { depth: number; analyses: typeof res.analyses }[] = [];
-    const res = analyzePosition(pos.state, pos.state.vanillaLeft + pos.state.chocolateLeft, { cancelled: false },
-      p => partials.push({ depth: p.depth, analyses: p.analyses }));
+    const res = await pool.analyze(pos.state).done;
     solverMs += Date.now() - t;
     solverNodes += res.stats?.nodesVisited ?? 0;
-    // Proven claims made in intermediate (depth-limited) iterations, as the UI would display them.
-    for (const p of partials) {
-      for (const a of p.analyses) {
-        if (!a.proven) continue;
-        const truth = childValue(pos.state, a.row, a.col);
-        const claimed = a.outcome === 'win' ? 1 : a.outcome === 'loss' ? -1 : 0;
-        if (claimed !== truth) {
-          partialWrong++;
-          if (partialWrong <= 5) console.log(`  wrong proven claim at d${p.depth}/${pos.state.vanillaLeft + pos.state.chocolateLeft}: moves=${pos.moves.map(([r, c]) => r * 6 + c).join(',')} move=(${a.row},${a.col}) solver=${a.outcome} truth=${truth}`);
-        }
-      }
-    }
-    if (res.depth < pos.state.vanillaLeft + pos.state.chocolateLeft && res.complete) earlyComplete++;
     for (const a of res.analyses) {
       const truth = childValue(pos.state, a.row, a.col);
       const claimed = a.outcome === 'win' ? 1 : a.outcome === 'loss' ? -1 : a.outcome === 'draw' ? 0 : null;
-      if (claimed !== truth) {
+      if (claimed !== truth || !a.proven) {
         mismatches++;
         if (a.outcome === 'draw') falseDraws++;
         if (mismatches <= 5) console.log(`  mismatch: moves=${pos.moves.map(([r, c]) => r * 6 + c).join(',')} move=(${a.row},${a.col}) solver=${a.outcome}${a.proven ? '(proven)' : ''} truth=${truth}`);
       }
+      checkedMoves++;
     }
   }
   if (cmd === 'verify') {
-    console.log(`ply ${ply}: positions=${checked} finalMismatches=${mismatches} (false draws: ${falseDraws}); wrong proven claims in intermediate iterations: ${partialWrong}; finished early: ${earlyComplete}`);
-    console.log(`  JS solver: ${solverNodes} nodes in ${solverMs} ms = ${Math.round(solverNodes / Math.max(1, solverMs))}k nodes/s; reference alpha-beta nodes: ${refNodes}`);
+    console.log(`ply ${ply}: positions=${checked} moves=${checkedMoves} mismatches=${mismatches} (false draws: ${falseDraws})`);
+    console.log(`  engine pool: ${solverNodes} nodes in ${solverMs} ms; reference alpha-beta nodes: ${refNodes}`);
+    process.exit(mismatches ? 1 : 0);
   }
 }

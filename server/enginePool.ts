@@ -14,6 +14,7 @@ class ThreadRunner implements EngineRunner {
   readonly worker: Worker;
   private readonly pending = new Map<number, { resolve: (r: EngineReply) => void; reject: (e: Error) => void }>();
   private nextId = 1;
+  private failure: Error | null = null;
 
   constructor(size: EngineSize) {
     this.worker = new Worker(new URL('./engineWorker.ts', import.meta.url), {
@@ -27,14 +28,18 @@ class ThreadRunner implements EngineRunner {
       if (m.reply) p.resolve(m.reply);
       else p.reject(new Error(m.error ?? 'Engine worker failed'));
     });
-    this.worker.on('error', error => {
-      for (const p of this.pending.values()) p.reject(error);
+    const fail = (error: Error) => {
+      this.failure ??= error;
+      for (const p of this.pending.values()) p.reject(this.failure);
       this.pending.clear();
-    });
+    };
+    this.worker.on('error', fail);
+    this.worker.on('exit', code => fail(new Error(`Engine worker exited with code ${code}`)));
     this.worker.unref();
   }
 
   run(position: EnginePosition, task: EngineTask): Promise<EngineReply> {
+    if (this.failure) return Promise.reject(this.failure);
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });

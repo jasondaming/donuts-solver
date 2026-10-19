@@ -12,6 +12,7 @@ class WebWorkerRunner implements EngineRunner {
   private readonly worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
   private readonly pending = new Map<number, { resolve: (r: EngineReply) => void; reject: (e: Error) => void }>();
   private nextId = 1;
+  private failure: Error | null = null;
 
   constructor() {
     this.worker.onmessage = (e: MessageEvent<Reply>) => {
@@ -22,12 +23,14 @@ class WebWorkerRunner implements EngineRunner {
       else p.reject(new Error(e.data.error ?? 'Engine worker failed'));
     };
     this.worker.onerror = e => {
-      for (const p of this.pending.values()) p.reject(new Error(e.message));
+      this.failure = new Error(e.message || 'Engine worker crashed');
+      for (const p of this.pending.values()) p.reject(this.failure);
       this.pending.clear();
     };
   }
 
   run(position: EnginePosition, task: EngineTask): Promise<EngineReply> {
+    if (this.failure) return Promise.reject(this.failure);
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });

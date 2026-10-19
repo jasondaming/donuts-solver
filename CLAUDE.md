@@ -50,7 +50,9 @@ After every `partial` message from any worker, `prefetchChildren` queues solve j
 ## Running
 
 ```sh
-# Terminal 1
+npm start         # both of the below in one terminal (scripts/start.mjs)
+
+# Or separately — Terminal 1
 npm run solver
 
 # Terminal 2

@@ -3,7 +3,11 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
   "scripts": {
+    "start": "node scripts/start.mjs",
     "dev": "vite",
     "solver": "node --experimental-strip-types server/server.ts",
     "check:server": "tsc -p tsconfig.server.json",

@@ -20,7 +20,6 @@ interface Props {
   history: TimelineEntry[];
   historyIndex: number;
   shareStatus: string | null;
-  solverDepth: number;
   solverComplete: boolean;
   solverSource: 'server' | 'browser' | null;
   solverStats: SolverProgress | null;
@@ -32,7 +31,7 @@ export function GameInfo({
   state, mode, hintsEnabled, onToggleHints, onNewGame, onEditPosition,
   onUndo, onRedo, onSwapColors, onShare, onLoad, onNavigateHistory,
   canUndo, canRedo, history, historyIndex, shareStatus,
-  solverDepth, solverComplete, solverSource, solverStats, openingGuide, hints,
+  solverComplete, solverSource, solverStats, openingGuide, hints,
 }: Props) {
   const { currentPlayer, status, vanillaLeft, chocolateLeft, constrainedLine } = state;
 
@@ -64,7 +63,6 @@ export function GameInfo({
   const bestHint = sortedHints[0] ?? null;
   const movesLeft = vanillaLeft + chocolateLeft;
   const openingHints = movesLeft >= 24 ? sortedHints.slice(0, 6) : [];
-  const searchEstimate = estimateSearch(solverStats, solverDepth, movesLeft);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minWidth: 240, maxWidth: 320 }}>
@@ -190,36 +188,12 @@ export function GameInfo({
           <div style={{ marginBottom: 4, color: 'rgba(255,255,255,0.72)' }}>
             {solverSource === 'server' ? 'Node service' : solverSource === 'browser' ? 'Browser fallback' : 'Connecting...'}
           </div>
-          {solverDepth === 0
-            ? 'Calculating...'
-            : solverComplete
-            ? `Solved with best play (depth ${solverDepth})`
-            : `Searching depth ${solverDepth} of ${movesLeft}...`}
+          {solverStatusLine(solverStats, solverComplete)}
 
           {solverStats && (
             <div style={{ marginTop: 6, fontSize: 12, color: 'rgba(255,255,255,0.78)', lineHeight: 1.45 }}>
               <div>Nodes: {solverStats.nodesVisited.toLocaleString()}</div>
-              <div>Cache hits: {solverStats.cacheHits.toLocaleString()}</div>
-              <div>Cache stores: {solverStats.cacheStores.toLocaleString()}</div>
               <div>Elapsed: {formatElapsed(solverStats.elapsedMs)}</div>
-            </div>
-          )}
-
-          {searchEstimate && (
-            <div style={{
-              marginTop: 8,
-              padding: '7px 8px',
-              borderRadius: 8,
-              background: 'rgba(0,0,0,0.14)',
-              border: '1px solid rgba(255,255,255,0.09)',
-              fontSize: 12,
-              lineHeight: 1.45,
-            }}>
-              <div>Speed: {searchEstimate.nodesPerSecond}/s</div>
-              <div>Last depth: {searchEstimate.lastDepth}</div>
-              <div>Next depth ETA: {searchEstimate.nextDepth}</div>
-              <div>Full rough ETA: {searchEstimate.fullSolve}</div>
-              <div>Worst tree: {searchEstimate.worstTree}</div>
             </div>
           )}
 
@@ -450,87 +424,11 @@ function moveSummary(move: OpeningMoveInsight): string {
   return parts.join(' / ');
 }
 
-interface SearchEstimate {
-  nodesPerSecond: string;
-  lastDepth: string;
-  nextDepth: string;
-  fullSolve: string;
-  worstTree: string;
-}
-
-function estimateSearch(
-  stats: SolverProgress | null,
-  solverDepth: number,
-  movesLeft: number,
-): SearchEstimate | null {
-  if (!stats || stats.elapsedMs <= 0 || stats.nodesVisited <= 0 || solverDepth <= 0) return null;
-
-  const nodesPerSecond = stats.nodesVisited / (stats.elapsedMs / 1000);
-  const timings = stats.depthTimings ?? [];
-  const last = timings[timings.length - 1] ?? null;
-  const previous = timings.length >= 2 ? timings[timings.length - 2] : null;
-  const observedBranch = previous && previous.depthNodes > 0
-    ? clamp(last!.depthNodes / previous.depthNodes, 1.05, 40)
-    : clamp(Math.pow(Math.max(stats.nodesVisited, 1), 1 / Math.max(solverDepth, 1)), 1.05, 40);
-  const lastDepthMs = Math.max(1, last?.depthElapsedMs ?? stats.elapsedMs);
-  const nextDepthMs = lastDepthMs * observedBranch;
-  const remainingDepths = Math.max(0, movesLeft - solverDepth);
-  const fullMs = estimateGeometricMs(lastDepthMs, observedBranch, remainingDepths);
-  const logWorstNodes = estimateWorstCaseLog10Nodes(movesLeft, solverDepth);
-  const logWorstSeconds = logWorstNodes - Math.log10(Math.max(nodesPerSecond, 1));
-
-  return {
-    nodesPerSecond: formatCompactNumber(nodesPerSecond),
-    lastDepth: last ? `${formatElapsed(last.depthElapsedMs)} (${formatCompactNumber(last.depthNodes)} nodes)` : formatElapsed(stats.elapsedMs),
-    nextDepth: formatElapsed(nextDepthMs),
-    fullSolve: fullMs === Infinity ? 'very large' : formatElapsed(fullMs),
-    worstTree: formatLogDuration(logWorstSeconds),
-  };
-}
-
-function estimateGeometricMs(lastDepthMs: number, observedBranch: number, remainingDepths: number): number {
-  if (remainingDepths <= 0) return 0;
-  let total = 0;
-  let next = lastDepthMs;
-
-  for (let i = 0; i < remainingDepths; i++) {
-    next *= observedBranch;
-    total += next;
-    if (!Number.isFinite(total) || total > 1e18) return Infinity;
-  }
-
-  return total;
-}
-
-function estimateWorstCaseLog10Nodes(movesLeft: number, solverDepth: number): number {
-  let log = 0;
-  for (let remaining = Math.max(1, movesLeft - solverDepth); remaining > 0; remaining--) {
-    log += Math.log10(remaining);
-  }
-  return log;
-}
-
-function formatCompactNumber(value: number): string {
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
-  if (value >= 10) return value.toFixed(0);
-  return value.toFixed(1);
-}
-
-function formatLogDuration(logSeconds: number): string {
-  if (!Number.isFinite(logSeconds)) return 'very large';
-  if (logSeconds < 6) return formatElapsed(Math.pow(10, logSeconds) * 1000);
-
-  const logYears = logSeconds - Math.log10(60 * 60 * 24 * 365);
-  if (logYears < 6) {
-    const years = Math.pow(10, logYears);
-    return `${formatCompactNumber(years)} years`;
-  }
-  return `~10^${Math.round(logYears)} years`;
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
+function solverStatusLine(stats: SolverProgress | null, complete: boolean): string {
+  if (!stats) return 'Calculating...';
+  if (complete) return 'Solved with perfect play';
+  if (stats.movesSolved < stats.moveCount) return `Proving moves: ${stats.movesSolved} of ${stats.moveCount}`;
+  return `All moves proven; finding distances (${stats.distancesPending} left)`;
 }
 
 function formatElapsed(ms: number): string {
@@ -552,7 +450,7 @@ function formatElapsed(ms: number): string {
   const days = Math.floor(hours / 24);
   if (days < 365) return `${days}d ${hours % 24}h`;
   const years = days / 365;
-  return `${formatCompactNumber(years)} years`;
+  return `${years.toFixed(1)} years`;
 }
 
 function compareAnalyses(a: MoveAnalysis, b: MoveAnalysis): number {
@@ -562,25 +460,14 @@ function compareAnalyses(a: MoveAnalysis, b: MoveAnalysis): number {
     h.outcome === 'unknown' ? 2 :
     3;
 
-  const ar = rank(a), br = rank(b);
-  if (ar !== br) return ar - br;
-  if (a.outcome === 'win' && b.outcome === 'win') {
-    return (a.movesToEnd ?? Number.MAX_SAFE_INTEGER) - (b.movesToEnd ?? Number.MAX_SAFE_INTEGER);
-  }
-  if (a.outcome === 'loss' && b.outcome === 'loss') {
-    return (b.movesToEnd ?? 0) - (a.movesToEnd ?? 0);
-  }
-  if (a.outcome === 'unknown' && b.outcome === 'unknown') {
-    return b.score - a.score;
-  }
-  return a.row - b.row || a.col - b.col;
+  return rank(a) - rank(b) || b.score - a.score || a.row - b.row || a.col - b.col;
 }
 
 function analysisLabel(h: MoveAnalysis): string {
-  if (h.outcome === 'win') return `Win in ${h.movesToEnd}`;
-  if (h.outcome === 'loss') return `Loss in ${h.movesToEnd}`;
+  if (h.outcome === 'win') return h.movesToEnd ? `Win in ${h.movesToEnd}` : 'Win';
+  if (h.outcome === 'loss') return h.movesToEnd ? `Loss in ${h.movesToEnd}` : 'Loss';
   if (h.outcome === 'draw') return 'Draw';
-  return `Searching d${h.depth}`;
+  return 'Solving...';
 }
 
 function analysisColor(h: MoveAnalysis): string {

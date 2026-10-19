@@ -112,14 +112,14 @@ export function CellView({
             textShadow: '0 1px 3px rgba(0,0,0,0.6)',
             lineHeight: 1.1,
           }}>
-            {hint.movesToEnd === null ? 'search' : hint.movesToEnd <= 1 ? 'now' : `in ${hint.movesToEnd}`}
+            {hint.movesToEnd === null ? (hint.proven ? '' : 'search') : hint.movesToEnd <= 1 ? 'now' : `in ${hint.movesToEnd}`}
           </span>
           <span style={{
             fontSize: size * 0.13,
             color: 'rgba(255,255,255,0.85)',
             textShadow: '0 1px 2px rgba(0,0,0,0.5)',
           }}>
-            {hint.proven ? 'best' : `d${hint.depth}`}
+            {hint.proven ? 'proven' : 'solving'}
           </span>
         </div>
       )}

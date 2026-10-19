@@ -40,22 +40,12 @@ export interface GameState {
   status: GameStatus;
 }
 
-export interface SolverDepthTiming {
-  depth: number;
-  depthNodes: number;
-  depthCacheHits: number;
-  depthCacheStores: number;
-  depthElapsedMs: number;
-  nodesVisited: number;
-  elapsedMs: number;
-}
-
 export interface SolverProgress {
   nodesVisited: number;
-  cacheHits: number;
-  cacheStores: number;
   elapsedMs: number;
-  depthTimings?: SolverDepthTiming[];
+  movesSolved: number;       // legal moves with a proven win/draw/loss
+  moveCount: number;         // legal moves
+  distancesPending: number;  // "win/loss in N" searches still queued or running
 }
 
 export interface MoveRecord {
@@ -71,9 +61,10 @@ export interface MoveAnalysis {
   row: number;
   col: number;
   outcome: 'win' | 'loss' | 'draw' | 'unknown';
-  // Plies from the current position, including this candidate move.
+  // Plies from the current position until the game ends, including this candidate move, with best play.
+  // null while unknown: a draw, a move still being solved, or a distance search that hit its budget.
   movesToEnd: number | null;
-  depth: number;  // plies searched from the current position
+  depth: number;  // plies searched from the current position (the rest of the game once proven)
   proven: boolean;
   score: number;  // positive is good for the side to move
 }

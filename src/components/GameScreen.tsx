@@ -13,6 +13,9 @@ import {
 } from '../game/session';
 import { analyzeOpening } from '../game/openingGuide';
 import { getServerSolve, startServerSolve } from '../solver/serverClient';
+import { browserSolverPool } from '../solver/browserPool';
+import { pickBestMove } from '../solver/solver';
+import { lookupOpening } from '../solver/openingBook';
 import { BoardView } from './BoardView';
 import { GameInfo } from './GameInfo';
 import { PositionEditor } from './PositionEditor';
@@ -34,6 +37,7 @@ interface SolverMsg {
 
 interface SolverState extends SolverMsg {
   positionKey: string;
+  provenAt: number | null;  // when every legal move first had a proven outcome
 }
 
 type SolverSource = 'server' | 'browser';
@@ -60,8 +64,8 @@ export function GameScreen({ config, mode, initialSession, onLoadSession, onNewG
   const positionKey = encodePosition(state);
   const activeSolver = solverState?.positionKey === positionKey ? solverState : null;
   const hints = activeSolver?.analyses ?? EMPTY_ANALYSES;
-  const solverDepth = activeSolver?.depth ?? 0;
   const solverComplete = activeSolver?.complete ?? false;
+  const provenAt = activeSolver?.provenAt ?? null;
   const openingGuide = state.status.type === 'playing' ? analyzeOpening(state) : null;
 
   function handleMove(row: number, col: number) {
@@ -92,34 +96,51 @@ export function GameScreen({ config, mode, initialSession, onLoadSession, onNewG
 
     let disposed = false;
     let pollTimer: ReturnType<typeof setTimeout> | null = null;
-    let worker: Worker | null = null;
+    let browserSolve: { cancel(): void } | null = null;
     const abort = new AbortController();
 
-    const applyResult = (message: SolverMsg) => {
+    // Empty boards get their proven first-move map from the opening book at once; the live solve
+    // then adds the distances. Live outcomes win wherever both exist.
+    let live: SolverMsg | null = null;
+    let opening: MoveAnalysis[] | null = null;
+
+    const publish = () => {
       if (disposed) return;
-      setSolverState({
+      const message: SolverMsg = live ?? { analyses: opening ?? [], depth: state.vanillaLeft + state.chocolateLeft, complete: false };
+      const book = opening;
+      const analyses = (message.analyses ?? []).map(a =>
+        a.outcome === 'unknown' && book ? book.find(b => b.row === a.row && b.col === a.col) ?? a : a);
+      const allProven = analyses.length > 0 && analyses.every(a => a.proven);
+      // With book outcomes merged in, live value searches still running count as remaining work.
+      const stats = message.stats && {
+        ...message.stats,
+        movesSolved: analyses.filter(a => a.proven).length,
+        distancesPending: message.stats.distancesPending + message.stats.moveCount - message.stats.movesSolved,
+      };
+      setSolverState(prev => ({
         positionKey,
-        analyses: message.analyses ?? [],
+        analyses,
         depth: message.depth ?? 0,
         complete: message.complete ?? false,
-        stats: message.stats,
-      });
+        stats,
+        provenAt: prev?.positionKey === positionKey && prev.provenAt !== null ? prev.provenAt : allProven ? Date.now() : null,
+      }));
     };
+
+    const applyResult = (message: SolverMsg) => {
+      live = message;
+      publish();
+    };
+
+    void lookupOpening(state).then(analyses => {
+      opening = analyses;
+      if (analyses) publish();
+    }, () => {});
 
     const startBrowserWorker = () => {
       if (disposed) return;
       setSolverSource('browser');
-
-      worker = new Worker(
-        new URL('../solver/worker.ts', import.meta.url),
-        { type: 'module' },
-      );
-
-      worker.onmessage = (e: MessageEvent<SolverMsg>) => {
-        applyResult(e.data);
-      };
-
-      worker.postMessage({ type: 'analyze', state });
+      browserSolve = browserSolverPool().analyze(state, applyResult);
     };
 
     const pollServerJob = async (jobId: string) => {
@@ -158,7 +179,7 @@ export function GameScreen({ config, mode, initialSession, onLoadSession, onNewG
       disposed = true;
       abort.abort();
       if (pollTimer) clearTimeout(pollTimer);
-      worker?.terminate();
+      browserSolve?.cancel();
     };
   }, [positionKey, state]);
 
@@ -167,18 +188,20 @@ export function GameScreen({ config, mode, initialSession, onLoadSession, onNewG
       (sessionMode === 'hva' && state.currentPlayer === 'chocolate') ||
       (sessionMode === 'avh' && state.currentPlayer === 'vanilla');
 
-    if (!isAtLatestMove || !isAITurn || state.status.type !== 'playing' || hints.length === 0) return;
+    if (!isAtLatestMove || !isAITurn || state.status.type !== 'playing' || provenAt === null) return;
 
+    // Every move is proven by now; give the distance pass a few seconds to find the fastest win.
+    const delay = solverComplete ? 600 : Math.max(600, provenAt + 3000 - Date.now());
     if (aiTimerRef.current) clearTimeout(aiTimerRef.current);
     aiTimerRef.current = setTimeout(() => {
       const best = pickBestMove(hints);
       if (best) playAIMove(best[0], best[1]);
-    }, solverComplete ? 600 : 300);
+    }, delay);
 
     return () => {
       if (aiTimerRef.current) clearTimeout(aiTimerRef.current);
     };
-  }, [hints, solverComplete, sessionMode, state.currentPlayer, state.status.type, isAtLatestMove]);
+  }, [hints, provenAt, solverComplete, sessionMode, state.currentPlayer, state.status.type, isAtLatestMove]);
 
   useEffect(() => {
     window.localStorage.setItem(SAVED_SESSION_KEY, encodeGameSession({
@@ -283,7 +306,6 @@ export function GameScreen({ config, mode, initialSession, onLoadSession, onNewG
           history={history}
           historyIndex={safeHistoryIndex}
           shareStatus={shareStatus}
-          solverDepth={solverDepth}
           solverComplete={solverComplete}
           solverSource={solverSource}
           solverStats={activeSolver?.stats ?? null}
@@ -317,23 +339,4 @@ function encodePosition(state: GameState): string {
     : 'N';
   key += `${state.vanillaLeft},${state.chocolateLeft},${state.status.type}`;
   return key;
-}
-
-function pickBestMove(hints: MoveAnalysis[]): [number, number] | null {
-  if (hints.length === 0) return null;
-  const wins = hints
-    .filter(h => h.outcome === 'win' && h.movesToEnd !== null)
-    .sort((a, b) => a.movesToEnd! - b.movesToEnd!);
-  if (wins.length > 0) return [wins[0].row, wins[0].col];
-
-  const draws = hints.filter(h => h.outcome === 'draw');
-  if (draws.length > 0) return [draws[0].row, draws[0].col];
-
-  const unknowns = hints.filter(h => h.outcome === 'unknown').sort((a, b) => b.score - a.score);
-  if (unknowns.length > 0) return [unknowns[0].row, unknowns[0].col];
-
-  const losses = hints
-    .filter(h => h.outcome === 'loss' && h.movesToEnd !== null)
-    .sort((a, b) => b.movesToEnd! - a.movesToEnd!);
-  return losses.length > 0 ? [losses[0].row, losses[0].col] : null;
 }

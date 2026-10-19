@@ -5,21 +5,20 @@ Local solver service and browser UI for the board game Donuts.
 ## Solver Model
 
 - The game engine generates legal moves from the current constraint line, including disobedience when the constrained line is full.
-- Each candidate move is searched with iterative deepening minimax and alpha-beta pruning.
-- The preferred solver runs as a local Node service using worker threads. The browser UI only submits positions and polls for job progress.
-- Job checkpoints are saved under `.solver-cache/jobs` after each completed iterative-deepening depth.
-- A persistent transposition journal is stored in `.solver-cache/exact.journal`; it reuses exact, lower-bound, and upper-bound entries across jobs and restarts.
-- On service restart, unfinished `running` jobs are loaded and resumed from the next depth.
-- If the Node service is not running, the UI falls back to the browser Web Worker.
-- Results are reported from the side-to-move perspective: win, loss, draw, or unknown while the full proof is still running.
+- Every legal move is solved exactly: win, draw, or loss with perfect play by both sides. The solver is a win/draw/loss alpha-beta search over bitboards with a fixed-size transposition table, written in C (`engine/wdl.c`) and compiled to WebAssembly. The Node service and the browser run the same engine.
+- Moves are spread over a pool of engines, one per worker thread (service) or Web Worker (browser), and each move's result appears as soon as it is proven. On one 8-core machine the empty board takes about 3 s; mid-game positions take milliseconds.
+- A second pass fills in `Win in N` / `Loss in N` for the winning and losing moves with node-budgeted searches. A move whose budget runs out keeps its proven result and shows just `Win` or `Loss`.
 - `Win in N` and `Loss in N` count plies from the current position, including the candidate move. An immediate win is `Win in 1` in the sidebar and `now` on the board.
-- Incomplete depth-limited zero scores are shown as `Searching dN`, not as draws. A draw is only shown when the remaining game tree has been exhausted.
+- Empty boards are answered instantly from `src/solver/openingBook.json`: the first-move values of all 1,536 distinct layouts (`scripts/precompute-openings.ts`).
+- Arbitrary positions work too (position editor): any pieces of both colors, either side to move, and any constrained line. The game is taken to end after `vanillaLeft + chocolateLeft` more donuts.
+- Memory stays flat: each engine allocates its tables once (about 60 MB per service thread, 30 MB per browser worker) and nothing is cached on disk.
+- The preferred solver is the local Node service; if it is not running, the UI uses the browser workers instead.
 
 ## UI
 
 - Colored board overlays summarize each legal move.
 - The sidebar lists every legal move sorted by best-play value: fastest wins, draws, unknowns, then slowest losses.
-- AI modes use the same solver output and prefer proven wins, then proven draws, then unknown moves, then delayed losses.
+- AI modes wait until every move is proven, then play the fastest win, else a draw, else the slowest loss.
 - The position editor can set arbitrary pieces, the side to move, and the last-played piece that defines the active constraint.
 
 ## Setting Up on a New Computer
@@ -37,7 +36,7 @@ npm start
 
 No API keys or `.env` files are required. The optional photo board-detection feature asks for an Anthropic API key in the UI and keeps it in that browser's local storage only.
 
-To carry over solver progress from another machine, copy its `.solver-cache` folder into the repo root before starting the service. A backup of the cache, the rulebook PDF, and a git bundle of the full history are kept outside the repo (see the hosting package README on the external drive).
+The rulebook PDF and a git bundle of the full history are kept outside the repo (see the hosting package README on the external drive).
 
 ## Commands
 
@@ -49,12 +48,14 @@ npm run lint
 npx tsc -b            # type-check frontend
 npm run check:server  # type-check server
 npm run build         # production build (also what GitHub Pages deploys)
+npm run validate      # engine vs. plain JS searches: perft, values, distances, editor positions
+npm run build:engine  # recompile engine/wdl.c into src/solver/wdlWasm.ts (needs clang + wasm-ld)
 ```
+
+The compiled engine is checked in (`src/solver/wdlWasm.ts`), so only changes to `engine/wdl.c` need LLVM.
 
 The UI uses `http://localhost:8787` by default; override it with `VITE_DONUTS_SOLVER_URL` if needed.
 
-The solver service uses `.solver-cache` by default. Override with `DONUTS_SOLVER_CACHE_DIR`, and override the service port with `DONUTS_SOLVER_PORT`.
+Override the service port with `DONUTS_SOLVER_PORT`.
 
-Checkpoint scope: checkpoints preserve the latest completed search depth and move analyses. The transposition journal is persisted, so repeated solves of related positions can reuse previously searched bounds and exact states instead of starting cold.
-
-Pushing to `main` deploys the UI to GitHub Pages (https://jasondaming.github.io/donuts-solver/). The hosted page has no solver service, so it falls back to the in-browser worker unless a local service is running.
+Pushing to `main` deploys the UI to GitHub Pages (https://jasondaming.github.io/donuts-solver/). The hosted page has no solver service, so it uses the in-browser engine workers unless a local service is running.

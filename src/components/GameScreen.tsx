@@ -111,7 +111,12 @@ export function GameScreen({ config, mode, initialSession, onLoadSession, onNewG
       const analyses = (message.analyses ?? []).map(a =>
         a.outcome === 'unknown' && book ? book.find(b => b.row === a.row && b.col === a.col) ?? a : a);
       const allProven = analyses.length > 0 && analyses.every(a => a.proven);
-      const stats = message.stats && { ...message.stats, movesSolved: analyses.filter(a => a.proven).length };
+      // With book outcomes merged in, live value searches still running count as remaining work.
+      const stats = message.stats && {
+        ...message.stats,
+        movesSolved: analyses.filter(a => a.proven).length,
+        distancesPending: message.stats.distancesPending + message.stats.moveCount - message.stats.movesSolved,
+      };
       setSolverState(prev => ({
         positionKey,
         analyses,

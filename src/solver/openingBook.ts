@@ -33,9 +33,12 @@ let book: Promise<Record<string, string>> | null = null;
 export async function lookupOpening(state: GameState): Promise<MoveAnalysis[] | null> {
   if (!isOpeningPosition(state)) return null;
   book ??= import('./openingBook.json').then(m => m.default as Record<string, string>);
-  const dirs = state.board.flat().map(cell => cell.direction).join('');
+  return openingFromBook(await book, state.board.flat().map(cell => cell.direction).join(''));
+}
+
+export function openingFromBook(book: Record<string, string>, dirs: string): MoveAnalysis[] | null {
   const { dirs: key, turns } = canonicalLayout(dirs);
-  const values = (await book)[key];
+  const values = book[key];
   if (!values) return null;
   return Array.from({ length: 36 }, (_, i) => {
     // Cell i of this board sits at (c, 5 - r) after each clockwise turn.
